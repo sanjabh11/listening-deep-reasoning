@@ -6,11 +6,18 @@ export const ResponseSchema = z.object({
 });
 
 export type ApiResponse = z.infer<typeof ResponseSchema>;
+export type MessageType = "user" | "reasoning" | "answer" | "system";
+
+export interface Message {
+  type: MessageType;
+  content: string;
+}
 
 const STORAGE_KEY = "chat_history";
 const MAX_HISTORY = 5;
+const API_URL = "https://api.deepseek.com/chat/completions";
 
-export const saveToLocalStorage = (messages: any[]) => {
+export const saveToLocalStorage = (messages: Message[]) => {
   try {
     const trimmedHistory = messages.slice(0, MAX_HISTORY);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmedHistory));
@@ -19,7 +26,7 @@ export const saveToLocalStorage = (messages: any[]) => {
   }
 };
 
-export const loadFromLocalStorage = () => {
+export const loadFromLocalStorage = (): Message[] => {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     return stored ? JSON.parse(stored) : [];
@@ -31,10 +38,31 @@ export const loadFromLocalStorage = () => {
 
 export const callDeepSeek = async (prompt: string): Promise<ApiResponse | null> => {
   try {
-    // Simulated API call for now
+    // For development/demo purposes, we'll simulate the API response
+    // In production, replace this with actual API call using:
+    /*
+    const response = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: prompt }
+        ],
+        stream: false
+      })
+    });
+    const data = await response.json();
+    */
+
+    // Simulated response for development
     const response = {
-      content: "This is a simulated response. In a real implementation, this would be streaming from the DeepSeek API.",
-      reasoning: "Analyzing the question and breaking it down into components...\nConsidering relevant context and potential approaches...",
+      content: "This is a simulated response from DeepSeek API. In production, this would be the actual API response.",
+      reasoning: "Analyzing the question and formulating a response based on available context and knowledge...",
     };
     
     return response;

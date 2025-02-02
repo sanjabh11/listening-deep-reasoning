@@ -2,14 +2,9 @@ import { useState, useEffect } from "react";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
-import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage } from "@/lib/api";
+import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 import { EXPERT_PROMPTS, ARCHITECT_PROMPTS } from "@/lib/prompts";
-
-interface Message {
-  type: "user" | "reasoning" | "answer" | "system";
-  content: string;
-}
 
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -18,45 +13,38 @@ const Index = () => {
   const { toast } = useToast();
 
   useEffect(() => {
-    // Load chat history from localStorage on component mount
     const savedMessages = loadFromLocalStorage();
-    if (savedMessages.length > 0) {
-      setMessages([
-        {
-          type: "system",
-          content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled",
-        },
-        ...savedMessages,
-      ]);
-    } else {
-      setMessages([
-        {
-          type: "system",
-          content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled",
-        },
-      ]);
-    }
+    const initialMessages: Message[] = [
+      {
+        type: "system",
+        content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled",
+      },
+      ...savedMessages,
+    ];
+    setMessages(initialMessages);
   }, []);
 
   const handleSend = async (message: string) => {
     setIsProcessing(true);
     setShowOptions(false);
 
-    // Add user message
-    const updatedMessages = [...messages, { type: "user", content: message }];
-    setMessages(updatedMessages);
+    const newMessages: Message[] = [
+      ...messages,
+      { type: "user", content: message }
+    ];
+    setMessages(newMessages);
 
     try {
       const response = await callDeepSeek(message);
       
       if (response) {
-        const newMessages = [
-          ...updatedMessages,
+        const updatedMessages: Message[] = [
+          ...newMessages,
           { type: "reasoning", content: response.reasoning },
           { type: "answer", content: response.content },
         ];
-        setMessages(newMessages);
-        saveToLocalStorage(newMessages.slice(1)); // Save excluding system message
+        setMessages(updatedMessages);
+        saveToLocalStorage(updatedMessages.slice(1)); // Save excluding system message
         setShowOptions(true);
       } else {
         toast({
