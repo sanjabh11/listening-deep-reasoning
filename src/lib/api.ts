@@ -36,11 +36,8 @@ export const loadFromLocalStorage = (): Message[] => {
   }
 };
 
-export const callDeepSeek = async (prompt: string): Promise<ApiResponse | null> => {
+export const callDeepSeek = async (prompt: string, apiKey: string): Promise<ApiResponse | null> => {
   try {
-    // For development/demo purposes, we'll simulate the API response
-    // In production, replace this with actual API call using:
-    /*
     const response = await fetch(API_URL, {
       method: 'POST',
       headers: {
@@ -56,16 +53,16 @@ export const callDeepSeek = async (prompt: string): Promise<ApiResponse | null> 
         stream: false
       })
     });
-    const data = await response.json();
-    */
 
-    // Simulated response for development
-    const response = {
-      content: "This is a simulated response from DeepSeek API. In production, this would be the actual API response.",
+    if (!response.ok) {
+      throw new Error(`API call failed: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return {
+      content: data.choices[0].message.content,
       reasoning: "Analyzing the question and formulating a response based on available context and knowledge...",
     };
-    
-    return response;
   } catch (error) {
     console.error("API call failed:", error);
     return null;

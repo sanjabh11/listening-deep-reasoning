@@ -2,14 +2,15 @@ import { useState, useEffect } from "react";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
+import { ApiKeyInput } from "@/components/ApiKeyInput";
 import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message } from "@/lib/api";
-import { useToast } from "@/components/ui/use-toast";
-import { EXPERT_PROMPTS, ARCHITECT_PROMPTS } from "@/lib/prompts";
+import { useToast } from "@/hooks/use-toast";
 
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [showOptions, setShowOptions] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [apiKey, setApiKey] = useState<string | null>(null);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -25,6 +26,15 @@ const Index = () => {
   }, []);
 
   const handleSend = async (message: string) => {
+    if (!apiKey) {
+      toast({
+        title: "Error",
+        description: "Please enter your API key first",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsProcessing(true);
     setShowOptions(false);
 
@@ -35,7 +45,7 @@ const Index = () => {
     setMessages(newMessages);
 
     try {
-      const response = await callDeepSeek(message);
+      const response = await callDeepSeek(message, apiKey);
       
       if (response) {
         const updatedMessages: Message[] = [
@@ -49,7 +59,7 @@ const Index = () => {
       } else {
         toast({
           title: "Error",
-          description: "Failed to get a response. Please try again.",
+          description: "Failed to get a response. Please check your API key and try again.",
           variant: "destructive",
         });
       }
@@ -79,6 +89,14 @@ const Index = () => {
       handleSend(prompts[choice as 1 | 2 | 3]);
     }
   };
+
+  if (!apiKey) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <ApiKeyInput onSubmit={setApiKey} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col max-w-4xl mx-auto p-4">
