@@ -4,6 +4,7 @@ import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
 import { ApiKeyInput } from "@/components/ApiKeyInput";
 import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message } from "@/lib/api";
+import { AudioManager } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
 
 const Index = () => {
@@ -11,14 +12,16 @@ const Index = () => {
   const [showOptions, setShowOptions] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [elevenLabsKey, setElevenLabsKey] = useState<string | null>(null);
   const { toast } = useToast();
+  const audioManager = AudioManager.getInstance();
 
   useEffect(() => {
     const savedMessages = loadFromLocalStorage();
     const initialMessages: Message[] = [
       {
         type: "system",
-        content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled",
+        content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled\n🔊 Voice Feedback: Ready",
       },
       ...savedMessages,
     ];
@@ -29,7 +32,7 @@ const Index = () => {
     if (!apiKey) {
       toast({
         title: "Error",
-        description: "Please enter your API key first",
+        description: "Please enter your DeepSeek API key first",
         variant: "destructive",
       });
       return;
@@ -54,8 +57,14 @@ const Index = () => {
           { type: "answer", content: response.content },
         ];
         setMessages(updatedMessages);
-        saveToLocalStorage(updatedMessages.slice(1)); // Save excluding system message
+        saveToLocalStorage(updatedMessages.slice(1));
         setShowOptions(true);
+
+        // Generate speech for reasoning and answer if ElevenLabs key is available
+        if (elevenLabsKey) {
+          await audioManager.generateAndPlaySpeech(response.reasoning, elevenLabsKey);
+          await audioManager.generateAndPlaySpeech(response.content, elevenLabsKey);
+        }
       } else {
         toast({
           title: "Error",
@@ -76,7 +85,7 @@ const Index = () => {
 
   const handleOptionSelect = (choice: number) => {
     if (choice === 4) {
-      // Start new topic
+      audioManager.stop();
       setMessages([messages[0]]);
       saveToLocalStorage([]);
       setShowOptions(false);
@@ -90,10 +99,19 @@ const Index = () => {
     }
   };
 
-  if (!apiKey) {
+  if (!apiKey || !elevenLabsKey) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
-        <ApiKeyInput onSubmit={setApiKey} />
+        {!apiKey ? (
+          <ApiKeyInput onSubmit={setApiKey} />
+        ) : (
+          <ApiKeyInput 
+            onSubmit={setElevenLabsKey}
+            title="Enter ElevenLabs API Key"
+            description="Your API key will only be stored in memory during this session."
+            placeholder="Your ElevenLabs API key..."
+          />
+        )}
       </div>
     );
   }
