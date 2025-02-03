@@ -16,7 +16,8 @@ export const callArchitectLLM = async (
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        // Changed: Remove 'Bearer' prefix for Gemini API
+        "x-goog-api-key": apiKey,
       },
       body: JSON.stringify({
         contents: [{
