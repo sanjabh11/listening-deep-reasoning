@@ -69,6 +69,8 @@ export const callDeepSeek = async (prompt: string, apiKey: string): Promise<ApiR
           { role: "system", content: "You are a helpful assistant." },
           { role: "user", content: prompt }
         ],
+        temperature: 0.7,
+        max_tokens: 1000,
         stream: false
       })
     });
@@ -84,6 +86,6 @@ export const callDeepSeek = async (prompt: string, apiKey: string): Promise<ApiR
     };
   } catch (error) {
     console.error("API call failed:", error);
-    return null;
+    throw error; // Re-throw to handle in the component
   }
 };

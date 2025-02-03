@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
-import { ApiKeyInput } from "@/components/ApiKeyInput";
+import { ApiKeyManager } from "@/components/ApiKeyManager";
 import { ArchitectReview } from "@/components/ArchitectReview";
 import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message, saveApiKeys, loadApiKeys } from "@/lib/api";
 import { callArchitectLLM } from "@/lib/architect";
@@ -17,12 +17,19 @@ const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [showOptions, setShowOptions] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [apiKey, setApiKey] = useState<string | null>(null);
-  const [elevenLabsKey, setElevenLabsKey] = useState<string | null>(null);
-  const [geminiKey, setGeminiKey] = useState<string | null>(null);
+  const [apiKeys, setApiKeys] = useState<{
+    deepseek: string | null;
+    elevenlabs: string | null;
+    gemini: string | null;
+  }>({
+    deepseek: null,
+    elevenlabs: null,
+    gemini: null
+  });
+  
   const [audioEnabled, setAudioEnabled] = useState(() => {
     const saved = localStorage.getItem(AUDIO_ENABLED_KEY);
-    return saved ? JSON.parse(saved) : false; // Default to muted
+    return saved ? JSON.parse(saved) : false;
   });
   
   const { toast } = useToast();
@@ -33,9 +40,11 @@ const Index = () => {
     const savedKeys = loadApiKeys();
     
     if (savedKeys) {
-      setApiKey(savedKeys.deepseek);
-      setElevenLabsKey(savedKeys.elevenlabs);
-      setGeminiKey(savedKeys.gemini);
+      setApiKeys({
+        deepseek: savedKeys.deepseek || null,
+        elevenlabs: savedKeys.elevenlabs || null,
+        gemini: savedKeys.gemini || null
+      });
     }
 
     const initialMessages: Message[] = [
@@ -48,27 +57,17 @@ const Index = () => {
     setMessages(initialMessages);
   }, []);
 
-  // Save audio preference
   useEffect(() => {
     localStorage.setItem(AUDIO_ENABLED_KEY, JSON.stringify(audioEnabled));
   }, [audioEnabled]);
 
-  const handleApiKeySubmit = (key: string) => {
-    setApiKey(key);
-    const currentKeys = loadApiKeys() || {};
-    saveApiKeys({ ...currentKeys, deepseek: key });
-  };
-
-  const handleElevenLabsKeySubmit = (key: string) => {
-    setElevenLabsKey(key);
-    const currentKeys = loadApiKeys() || {};
-    saveApiKeys({ ...currentKeys, elevenlabs: key });
-  };
-
-  const handleGeminiKeySubmit = (key: string) => {
-    setGeminiKey(key);
-    const currentKeys = loadApiKeys() || {};
-    saveApiKeys({ ...currentKeys, gemini: key });
+  const handleApiKeysSubmit = (keys: { deepseek: string; elevenlabs?: string; gemini?: string }) => {
+    setApiKeys({
+      deepseek: keys.deepseek,
+      elevenlabs: keys.elevenlabs || null,
+      gemini: keys.gemini || null
+    });
+    saveApiKeys(keys);
   };
 
   const toggleAudio = () => {
@@ -79,7 +78,7 @@ const Index = () => {
   };
 
   const handleSend = async (message: string) => {
-    if (!apiKey) {
+    if (!apiKeys.deepseek) {
       toast({
         title: "Error",
         description: "Please enter your DeepSeek API key first",
@@ -98,7 +97,7 @@ const Index = () => {
     setMessages(newMessages);
 
     try {
-      const response = await callDeepSeek(message, apiKey);
+      const response = await callDeepSeek(message, apiKeys.deepseek);
       
       if (response) {
         const updatedMessages: Message[] = [
@@ -110,22 +109,16 @@ const Index = () => {
         saveToLocalStorage(updatedMessages.slice(1));
         setShowOptions(true);
 
-        // Generate speech for reasoning and answer if ElevenLabs key is available
-        if (elevenLabsKey) {
-          await audioManager.generateAndPlaySpeech(response.reasoning, elevenLabsKey);
-          await audioManager.generateAndPlaySpeech(response.content, elevenLabsKey);
+        if (audioEnabled && apiKeys.elevenlabs) {
+          await audioManager.generateAndPlaySpeech(response.reasoning, apiKeys.elevenlabs);
+          await audioManager.generateAndPlaySpeech(response.content, apiKeys.elevenlabs);
         }
-      } else {
-        toast({
-          title: "Error",
-          description: "Failed to get a response. Please check your API key and try again.",
-          variant: "destructive",
-        });
       }
     } catch (error) {
+      console.error("API call failed:", error);
       toast({
         title: "Error",
-        description: "An unexpected error occurred. Please try again.",
+        description: "Failed to get a response. Please check your API key and try again.",
         variant: "destructive",
       });
     } finally {
@@ -135,15 +128,14 @@ const Index = () => {
 
   const handleOptionSelect = async (choice: number) => {
     if (choice === 4) {
-      audioManager.stop();
       setMessages([messages[0]]);
       saveToLocalStorage([]);
       setShowOptions(false);
     } else if (choice === 5) {
-      if (!geminiKey) {
+      if (!apiKeys.gemini) {
         toast({
           title: "Error",
-          description: "Please enter your Gemini API key first",
+          description: "Please enter your Gemini API key to use the architect review feature",
           variant: "destructive",
         });
         return;
@@ -153,28 +145,16 @@ const Index = () => {
       setShowOptions(false);
 
       try {
-        const review = await callArchitectLLM(messages, geminiKey);
+        const review = await callArchitectLLM(messages, apiKeys.gemini);
         if (review) {
           const updatedMessages: Message[] = [
             ...messages,
             { type: "system", content: "🔍 Architect Review Requested" },
-            { 
-              type: "reasoning", 
-              content: "Analyzing solution quality, architecture, and potential improvements..." 
-            },
-            { 
-              type: "answer", 
-              content: JSON.stringify(review, null, 2)
-            }
+            { type: "reasoning", content: "Analyzing solution quality, architecture, and potential improvements..." },
+            { type: "answer", content: JSON.stringify(review, null, 2) }
           ];
           setMessages(updatedMessages);
           saveToLocalStorage(updatedMessages.slice(1));
-        } else {
-          toast({
-            title: "Error",
-            description: "Failed to get architect review. Please check your Gemini API key and try again.",
-            variant: "destructive",
-          });
         }
       } catch (error) {
         console.error("Architect review error:", error);
@@ -189,41 +169,35 @@ const Index = () => {
       }
     } else {
       const prompts = {
-        1: "Ask a follow-up question",
-        2: "Explain the reasoning in more detail",
-        3: "Show examples to support this reasoning",
+        1: "Could you provide more details about that?",
+        2: "Please explain your reasoning in more detail.",
+        3: "Can you show some examples to illustrate this?",
       };
       handleSend(prompts[choice as 1 | 2 | 3]);
     }
   };
 
-  if (!apiKey || !elevenLabsKey || !geminiKey) {
+  if (!apiKeys.deepseek) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
-        {!apiKey ? (
-          <ApiKeyInput onSubmit={handleApiKeySubmit} />
-        ) : !elevenLabsKey ? (
-          <ApiKeyInput 
-            onSubmit={handleElevenLabsKeySubmit}
-            title="Enter ElevenLabs API Key"
-            description="Your API key will only be stored in memory during this session."
-            placeholder="Your ElevenLabs API key..."
-          />
-        ) : (
-          <ApiKeyInput 
-            onSubmit={handleGeminiKeySubmit}
-            title="Enter Gemini API Key"
-            description="Your API key will only be stored in memory during this session."
-            placeholder="Your Gemini API key..."
-          />
-        )}
+        <ApiKeyManager 
+          onSubmit={handleApiKeysSubmit}
+          initialKeys={apiKeys}
+        />
       </div>
     );
   }
 
   return (
     <div className="min-h-screen flex flex-col max-w-4xl mx-auto p-4">
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-between mb-4">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setApiKeys({ deepseek: null, elevenlabs: null, gemini: null })}
+        >
+          Change API Keys
+        </Button>
         <Button
           variant="outline"
           size="sm"
