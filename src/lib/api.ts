@@ -15,7 +15,7 @@ export interface Message {
 
 const STORAGE_KEY = "chat_history";
 const MAX_HISTORY = 5;
-const API_URL = "https://api.deepseek.com/chat/completions";
+const API_URL = "https://api.deepseek.com/v1/chat/completions"; // Fixed API URL
 
 export const saveToLocalStorage = (messages: Message[]) => {
   try {
