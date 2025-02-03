@@ -9,9 +9,11 @@ import { callArchitectLLM } from "@/lib/architect";
 import { AudioManager } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
+import { ToastAction } from "@/components/ui/toast";
 import { Loader2, Volume2, VolumeX } from "lucide-react";
 
 const AUDIO_ENABLED_KEY = 'audio_enabled';
+const API_KEY_CHECK_INTERVAL = 30000; // 30 seconds
 
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -32,9 +34,12 @@ const Index = () => {
     return saved ? JSON.parse(saved) : false;
   });
   
+  const [showApiKeyManager, setShowApiKeyManager] = useState(false);
+  
   const { toast } = useToast();
   const audioManager = AudioManager.getInstance();
 
+  // Load saved data on mount
   useEffect(() => {
     const savedMessages = loadFromLocalStorage();
     const savedKeys = loadApiKeys();
@@ -46,49 +51,62 @@ const Index = () => {
         gemini: savedKeys.gemini || null
       });
     }
-
-    const initialMessages: Message[] = [
-      {
-        type: "system",
-        content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled\n🔊 Voice Feedback: Ready (Muted by default)",
-      },
-      ...savedMessages,
-    ];
-    setMessages(initialMessages);
+    
+    if (savedMessages && savedMessages.length > 0) {
+      setMessages(savedMessages);
+    }
   }, []);
 
+  // Save audio preference
   useEffect(() => {
     localStorage.setItem(AUDIO_ENABLED_KEY, JSON.stringify(audioEnabled));
   }, [audioEnabled]);
 
-  const handleApiKeysSubmit = (keys: { deepseek: string; elevenlabs?: string; gemini?: string }) => {
+  // Periodically validate API keys
+  useEffect(() => {
+    const validateKeys = () => {
+      const savedKeys = loadApiKeys();
+      if (savedKeys?.deepseek !== apiKeys.deepseek) {
+        setApiKeys(prev => ({
+          ...prev,
+          deepseek: savedKeys?.deepseek || null
+        }));
+      }
+    };
+
+    const interval = setInterval(validateKeys, API_KEY_CHECK_INTERVAL);
+    return () => clearInterval(interval);
+  }, [apiKeys.deepseek]);
+
+  const handleApiKeysSubmit = (keys: { [key: string]: string }) => {
     setApiKeys({
-      deepseek: keys.deepseek,
+      deepseek: keys.deepseek || null,
       elevenlabs: keys.elevenlabs || null,
       gemini: keys.gemini || null
     });
     saveApiKeys(keys);
-  };
-
-  const toggleAudio = () => {
-    setAudioEnabled(!audioEnabled);
-    if (!audioEnabled) {
-      audioManager.stop();
-    }
+    setShowApiKeyManager(false);
+    
+    // Show success toast
+    toast({
+      title: "Settings Saved",
+      description: "Your API keys have been updated successfully.",
+    });
   };
 
   const handleSend = async (message: string) => {
-    if (!apiKeys.deepseek) {
-      toast({
-        title: "Error",
-        description: "Please enter your DeepSeek API key first",
-        variant: "destructive",
-      });
-      return;
-    }
-
     setIsProcessing(true);
     setShowOptions(false);
+
+    if (!apiKeys.deepseek) {
+      toast({
+        title: "API Key Required",
+        description: "Please set your DeepSeek API key in settings before sending messages.",
+        variant: "destructive"
+      });
+      setIsProcessing(false);
+      return;
+    }
 
     const newMessages: Message[] = [
       ...messages,
@@ -97,7 +115,12 @@ const Index = () => {
     setMessages(newMessages);
 
     try {
-      const response = await callDeepSeek(message, apiKeys.deepseek);
+      // Pass the previous messages for context
+      const response = await callDeepSeek(
+        message, 
+        apiKeys.deepseek,
+        messages.slice(-4) // Keep last 4 messages for context
+      );
       
       if (response) {
         const updatedMessages: Message[] = [
@@ -107,22 +130,55 @@ const Index = () => {
         ];
         setMessages(updatedMessages);
         saveToLocalStorage(updatedMessages.slice(1));
-        setShowOptions(true);
 
         if (audioEnabled && apiKeys.elevenlabs) {
-          await audioManager.generateAndPlaySpeech(response.reasoning, apiKeys.elevenlabs);
-          await audioManager.generateAndPlaySpeech(response.content, apiKeys.elevenlabs);
+          try {
+            await audioManager.generateAndPlaySpeech(response.reasoning, apiKeys.elevenlabs);
+            await audioManager.generateAndPlaySpeech(response.content, apiKeys.elevenlabs);
+          } catch (audioError) {
+            console.error("Audio generation failed:", audioError);
+            toast({
+              title: "Audio Error",
+              description: "Failed to generate audio. Text response is still available.",
+              variant: "destructive"
+            });
+          }
         }
       }
     } catch (error) {
       console.error("API call failed:", error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to get a response';
+      
+      // Check if it's an API key related error
+      const isApiKeyError = errorMessage.toLowerCase().includes('api key') || 
+                           errorMessage.toLowerCase().includes('authentication');
+      
       toast({
-        title: "Error",
-        description: "Failed to get a response. Please check your API key and try again.",
+        title: isApiKeyError ? "API Key Error" : "Error",
+        description: errorMessage,
         variant: "destructive",
+        action: isApiKeyError ? (
+          <ToastAction altText="Open Settings" onClick={() => setShowApiKeyManager(true)}>
+            Open Settings
+          </ToastAction>
+        ) : undefined
       });
+      
+      // Add error message to chat
+      const errorMessages: Message[] = [
+        ...newMessages,
+        { 
+          type: "answer", 
+          content: isApiKeyError ? 
+            "I encountered an authentication error. Please check your API key in settings." :
+            "I apologize, but I encountered an error while processing your request. Please try again."
+        }
+      ];
+      setMessages(errorMessages);
+      saveToLocalStorage(errorMessages.slice(1));
     } finally {
       setIsProcessing(false);
+      setShowOptions(true);  // Always show options after processing
     }
   };
 
@@ -177,12 +233,21 @@ const Index = () => {
     }
   };
 
+  const toggleAudio = () => {
+    setAudioEnabled(!audioEnabled);
+    if (!audioEnabled) {
+      audioManager.stop();
+    }
+  };
+
   if (!apiKeys.deepseek) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <ApiKeyManager 
           onSubmit={handleApiKeysSubmit}
           initialKeys={apiKeys}
+          show={showApiKeyManager}
+          setShow={setShowApiKeyManager}
         />
       </div>
     );
@@ -230,6 +295,14 @@ const Index = () => {
       <div className="sticky bottom-0 bg-background pt-4">
         <ChatInput onSend={handleSend} disabled={isProcessing} />
       </div>
+      {showApiKeyManager && (
+        <ApiKeyManager 
+          onSubmit={handleApiKeysSubmit}
+          initialKeys={apiKeys}
+          show={showApiKeyManager}
+          setShow={setShowApiKeyManager}
+        />
+      )}
     </div>
   );
 };
