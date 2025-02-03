@@ -114,26 +114,85 @@ const Index = () => {
     ];
     setMessages(newMessages);
 
+    // Add thinking indicator
+    const thinkingMessage: Message = {
+      type: "system",
+      content: "🤔 Thinking..."
+    };
+    setMessages([...newMessages, thinkingMessage]);
+
     try {
-      // Pass the previous messages for context
+      // Handle thought process updates
+      const onThoughtUpdate = (thought: any) => {
+        const thoughtMessage: Message = {
+          type: "system",
+          content: `${getThoughtEmoji(thought.type)} ${thought.content}`
+        };
+        setMessages(prev => {
+          // Replace thinking indicator or add new thought
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg.type === "system" && (lastMsg.content.includes("🤔") || lastMsg.content.includes("💭"))) {
+            return [...prev.slice(0, -1), thoughtMessage];
+          }
+          return [...prev, thoughtMessage];
+        });
+      };
+
       const response = await callDeepSeek(
         message, 
         apiKeys.deepseek,
-        messages.slice(-4) // Keep last 4 messages for context
+        messages.slice(-4), // Keep last 4 messages for context
+        onThoughtUpdate
       );
       
-      if (response) {
-        const updatedMessages: Message[] = [
+      if (response.status === 'timeout') {
+        // Handle timeout with architect escalation option
+        const timeoutMessages: Message[] = [
           ...newMessages,
-          { type: "reasoning", content: response.reasoning },
-          { type: "answer", content: response.content },
+          { 
+            type: "system", 
+            content: "⏱️ " + response.timeoutReason || "Request timed out. Would you like to escalate to an architect review?"
+          }
         ];
+        setMessages(timeoutMessages);
+        
+        // Show escalation option
+        toast({
+          title: "Request Timed Out",
+          description: "The request is taking longer than expected. Would you like an architect to review?",
+          action: (
+            <ToastAction altText="Escalate" onClick={() => handleArchitectEscalation(message)}>
+              Escalate to Architect
+            </ToastAction>
+          ),
+          duration: 10000 // Show for 10 seconds
+        });
+      } else if (response.status === 'complete') {
+        const updatedMessages: Message[] = [
+          ...newMessages
+        ];
+
+        // Add thought process if available
+        if (response.thoughtProcess?.length) {
+          response.thoughtProcess.forEach(thought => {
+            updatedMessages.push({
+              type: "system",
+              content: `${getThoughtEmoji(thought.type)} ${thought.content}`
+            });
+          });
+        }
+
+        // Add final response
+        updatedMessages.push(
+          { type: "reasoning", content: response.reasoning },
+          { type: "answer", content: response.content }
+        );
+
         setMessages(updatedMessages);
         saveToLocalStorage(updatedMessages.slice(1));
 
         if (audioEnabled && apiKeys.elevenlabs) {
           try {
-            await audioManager.generateAndPlaySpeech(response.reasoning, apiKeys.elevenlabs);
             await audioManager.generateAndPlaySpeech(response.content, apiKeys.elevenlabs);
           } catch (audioError) {
             console.error("Audio generation failed:", audioError);
@@ -178,7 +237,47 @@ const Index = () => {
       saveToLocalStorage(errorMessages.slice(1));
     } finally {
       setIsProcessing(false);
-      setShowOptions(true);  // Always show options after processing
+      setShowOptions(true);
+    }
+  };
+
+  const handleArchitectEscalation = async (originalMessage: string) => {
+    if (!apiKeys.gemini) {
+      toast({
+        title: "Architect Review Unavailable",
+        description: "Please set up your Gemini API key in settings to use the architect review feature.",
+        action: (
+          <ToastAction altText="Open Settings" onClick={() => setShowApiKeyManager(true)}>
+            Open Settings
+          </ToastAction>
+        )
+      });
+      return;
+    }
+
+    setIsProcessing(true);
+    setMessages(prev => [...prev, { 
+      type: "system", 
+      content: "👨‍💻 Escalating to architect review..." 
+    }]);
+
+    try {
+      const review = await callArchitectLLM(messages, apiKeys.gemini);
+      if (review) {
+        setMessages(prev => [...prev.filter(m => m.content !== "👨‍💻 Escalating to architect review..."), { 
+          type: "answer", 
+          content: `🏗️ Architect Review:\n\n${review.content}` 
+        }]);
+      }
+    } catch (error) {
+      console.error("Architect review failed:", error);
+      toast({
+        title: "Architect Review Failed",
+        description: "Unable to get architect review at this time. Please try again later.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -237,6 +336,16 @@ const Index = () => {
     setAudioEnabled(!audioEnabled);
     if (!audioEnabled) {
       audioManager.stop();
+    }
+  };
+
+  const getThoughtEmoji = (type: string): string => {
+    switch (type) {
+      case 'thinking': return '💭';
+      case 'planning': return '📝';
+      case 'analyzing': return '🔍';
+      case 'solving': return '⚡';
+      default: return '💡';
     }
   };
 
