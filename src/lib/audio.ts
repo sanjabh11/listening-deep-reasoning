@@ -31,8 +31,8 @@ export class AudioManager {
   }
 
   async generateAndPlaySpeech(text: string, apiKey: string) {
-    // Don't generate speech for code blocks
-    if (text.includes('```') || text.includes('criticalIssues')) {
+    // Don't generate speech for code blocks or system messages
+    if (text.includes('```') || text.includes('criticalIssues') || text.includes('"status":')) {
       return;
     }
 
@@ -54,7 +54,7 @@ export class AudioManager {
         },
         body: JSON.stringify({
           text,
-          model_id: "eleven_multilingual_v2",
+          model_id: "eleven_turbo_v2",  // Changed to use the more efficient turbo model
           voice_settings: {
             stability: 0.5,
             similarity_boost: 0.75,
@@ -63,6 +63,15 @@ export class AudioManager {
       });
 
       if (!response.ok) {
+        const errorData = await response.json();
+        if (errorData.detail?.status === "quota_exceeded") {
+          toast({
+            title: "ElevenLabs Quota Exceeded",
+            description: errorData.detail.message || "Your ElevenLabs account has insufficient credits. Please check your quota.",
+            variant: "destructive",
+          });
+          return;
+        }
         throw new Error("Failed to generate speech");
       }
 
@@ -74,7 +83,7 @@ export class AudioManager {
         this.audio.onended = () => this.playNext();
         this.audio.onerror = (e) => {
           console.error("Audio playback error:", e);
-          this.playNext(); // Skip problematic audio
+          this.playNext();
           toast({
             title: "Audio Error",
             description: "There was an error playing the audio. Skipping to next.",
@@ -91,7 +100,7 @@ export class AudioManager {
       console.error("Speech generation error:", error);
       toast({
         title: "Error",
-        description: "Failed to generate speech",
+        description: "Failed to generate speech. Please check your API key and quota.",
         variant: "destructive",
       });
     }
