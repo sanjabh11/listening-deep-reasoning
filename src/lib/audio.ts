@@ -31,6 +31,12 @@ export class AudioManager {
   }
 
   async generateAndPlaySpeech(text: string, apiKey: string) {
+    // Check if audio is enabled in localStorage
+    const audioEnabled = localStorage.getItem('audio_enabled');
+    if (audioEnabled === 'false') {
+      return;
+    }
+
     // Don't generate speech for code blocks or system messages
     if (text.includes('```') || text.includes('criticalIssues') || text.includes('"status":')) {
       return;

@@ -9,7 +9,9 @@ import { callArchitectLLM } from "@/lib/architect";
 import { AudioManager } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
+import { Loader2, Volume2, VolumeX } from "lucide-react";
+
+const AUDIO_ENABLED_KEY = 'audio_enabled';
 
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -18,7 +20,11 @@ const Index = () => {
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [elevenLabsKey, setElevenLabsKey] = useState<string | null>(null);
   const [geminiKey, setGeminiKey] = useState<string | null>(null);
-  const [audioEnabled, setAudioEnabled] = useState(true);
+  const [audioEnabled, setAudioEnabled] = useState(() => {
+    const saved = localStorage.getItem(AUDIO_ENABLED_KEY);
+    return saved ? JSON.parse(saved) : false; // Default to muted
+  });
+  
   const { toast } = useToast();
   const audioManager = AudioManager.getInstance();
 
@@ -35,12 +41,17 @@ const Index = () => {
     const initialMessages: Message[] = [
       {
         type: "system",
-        content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled\n🔊 Voice Feedback: Ready",
+        content: "🛠️ Interactive Reasoning Explorer Initialized\n🔗 DeepSeek R1 Model: Chain-of-Thought Enabled\n🔊 Voice Feedback: Ready (Muted by default)",
       },
       ...savedMessages,
     ];
     setMessages(initialMessages);
   }, []);
+
+  // Save audio preference
+  useEffect(() => {
+    localStorage.setItem(AUDIO_ENABLED_KEY, JSON.stringify(audioEnabled));
+  }, [audioEnabled]);
 
   const handleApiKeySubmit = (key: string) => {
     setApiKey(key);
@@ -161,14 +172,15 @@ const Index = () => {
         } else {
           toast({
             title: "Error",
-            description: "Failed to get architect review. Please try again.",
+            description: "Failed to get architect review. Please check your Gemini API key and try again.",
             variant: "destructive",
           });
         }
       } catch (error) {
+        console.error("Architect review error:", error);
         toast({
           title: "Error",
-          description: "An unexpected error occurred during review.",
+          description: "An error occurred during the architect review. Please try again.",
           variant: "destructive",
         });
       } finally {
@@ -218,7 +230,8 @@ const Index = () => {
           onClick={toggleAudio}
           className="flex items-center gap-2"
         >
-          {audioEnabled ? '🔊 Mute' : '🔇 Unmute'}
+          {audioEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+          {audioEnabled ? 'Mute' : 'Unmute'}
         </Button>
       </div>
 
