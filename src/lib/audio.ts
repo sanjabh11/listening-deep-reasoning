@@ -8,8 +8,20 @@ export class AudioManager {
   private audio: HTMLAudioElement | null = null;
   private queue: string[] = [];
   private isPlaying = false;
+  private hasUserInteracted = false;
 
-  private constructor() {}
+  private constructor() {
+    // Add listener for user interaction
+    const handleInteraction = () => {
+      this.hasUserInteracted = true;
+      // Remove listeners after first interaction
+      document.removeEventListener('click', handleInteraction);
+      document.removeEventListener('keydown', handleInteraction);
+    };
+
+    document.addEventListener('click', handleInteraction);
+    document.addEventListener('keydown', handleInteraction);
+  }
 
   static getInstance(): AudioManager {
     if (!AudioManager.instance) {
@@ -20,6 +32,15 @@ export class AudioManager {
 
   async generateAndPlaySpeech(text: string, apiKey: string) {
     try {
+      if (!this.hasUserInteracted) {
+        toast({
+          title: "Audio Playback",
+          description: "Please interact with the page (click or press a key) to enable audio playback.",
+          variant: "default",
+        });
+        return;
+      }
+
       const response = await fetch(`${ELEVEN_LABS_API_URL}/${VOICE_ID}`, {
         method: "POST",
         headers: {
@@ -46,11 +67,20 @@ export class AudioManager {
       if (!this.audio) {
         this.audio = new Audio();
         this.audio.onended = () => this.playNext();
+        this.audio.onerror = (e) => {
+          console.error("Audio playback error:", e);
+          this.playNext(); // Skip problematic audio
+          toast({
+            title: "Audio Error",
+            description: "There was an error playing the audio. Skipping to next.",
+            variant: "destructive",
+          });
+        };
       }
 
       this.queue.push(audioUrl);
       if (!this.isPlaying) {
-        this.playNext();
+        await this.playNext();
       }
     } catch (error) {
       console.error("Speech generation error:", error);
@@ -62,7 +92,7 @@ export class AudioManager {
     }
   }
 
-  private playNext() {
+  private async playNext() {
     if (!this.audio || this.queue.length === 0) {
       this.isPlaying = false;
       return;
@@ -70,9 +100,23 @@ export class AudioManager {
 
     const nextUrl = this.queue.shift();
     if (nextUrl) {
-      this.audio.src = nextUrl;
-      this.audio.play();
-      this.isPlaying = true;
+      try {
+        this.audio.src = nextUrl;
+        this.isPlaying = true;
+        await this.audio.play().catch((error) => {
+          console.error("Playback error:", error);
+          this.isPlaying = false;
+          toast({
+            title: "Playback Error",
+            description: "Audio playback failed. Please try interacting with the page first.",
+            variant: "destructive",
+          });
+        });
+      } catch (error) {
+        console.error("Playback error:", error);
+        this.isPlaying = false;
+        this.playNext(); // Try next audio in queue
+      }
     }
   }
 
