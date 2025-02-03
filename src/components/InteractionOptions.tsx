@@ -2,9 +2,10 @@ import { Button } from "@/components/ui/button";
 
 interface InteractionOptionsProps {
   onSelect: (choice: number) => void;
+  disabled?: boolean;
 }
 
-export function InteractionOptions({ onSelect }: InteractionOptionsProps) {
+export function InteractionOptions({ onSelect, disabled }: InteractionOptionsProps) {
   const options = [
     "Ask follow-up question",
     "Explain reasoning in more detail",
@@ -21,7 +22,8 @@ export function InteractionOptions({ onSelect }: InteractionOptionsProps) {
           key={index}
           variant="outline"
           onClick={() => onSelect(index + 1)}
-          className="justify-start text-left"
+          disabled={disabled}
+          className="justify-start text-left hover:bg-gray-100 dark:hover:bg-gray-800"
         >
           {index + 1}. {option}
         </Button>

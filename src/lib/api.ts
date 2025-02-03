@@ -19,11 +19,7 @@ const MAX_HISTORY = 5;
 const API_URL = "https://api.deepseek.com/v1/chat/completions";
 
 export const saveApiKeys = (keys: { [key: string]: string }) => {
-  try {
-    localStorage.setItem(API_KEYS_STORAGE, JSON.stringify(keys));
-  } catch (error) {
-    console.error("Error saving API keys:", error);
-  }
+  localStorage.setItem(API_KEYS_STORAGE, JSON.stringify(keys));
 };
 
 export const loadApiKeys = () => {
@@ -38,7 +34,7 @@ export const loadApiKeys = () => {
 
 export const saveToLocalStorage = (messages: Message[]) => {
   try {
-    const trimmedHistory = messages.slice(0, MAX_HISTORY);
+    const trimmedHistory = messages.slice(-MAX_HISTORY);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmedHistory));
   } catch (error) {
     console.error("Error saving to localStorage:", error);
@@ -55,7 +51,7 @@ export const loadFromLocalStorage = (): Message[] => {
   }
 };
 
-export const callDeepSeek = async (prompt: string, apiKey: string): Promise<ApiResponse | null> => {
+export const callDeepSeek = async (prompt: string, apiKey: string): Promise<ApiResponse> => {
   try {
     const response = await fetch(API_URL, {
       method: 'POST',
@@ -70,22 +66,27 @@ export const callDeepSeek = async (prompt: string, apiKey: string): Promise<ApiR
           { role: "user", content: prompt }
         ],
         temperature: 0.7,
-        max_tokens: 1000,
-        stream: false
+        max_tokens: 1000
       })
     });
 
     if (!response.ok) {
-      throw new Error(`API call failed: ${response.statusText}`);
+      const errorData = await response.json();
+      throw new Error(errorData.error?.message || `API error: ${response.status}`);
     }
 
     const data = await response.json();
+    
+    if (!data.choices?.[0]?.message?.content) {
+      throw new Error('Invalid response format from API');
+    }
+
     return {
       content: data.choices[0].message.content,
-      reasoning: "Analyzing the question and formulating a response based on available context and knowledge...",
+      reasoning: "Analyzing the question and formulating a response based on available context and knowledge..."
     };
   } catch (error) {
     console.error("API call failed:", error);
-    throw error; // Re-throw to handle in the component
+    throw new Error(error instanceof Error ? error.message : 'Failed to get response from API');
   }
 };
