@@ -3,7 +3,9 @@ import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
 import { ApiKeyInput } from "@/components/ApiKeyInput";
+import { ArchitectReview } from "@/components/ArchitectReview";
 import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message } from "@/lib/api";
+import { callArchitectLLM } from "@/lib/architect";
 import { AudioManager } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
 
@@ -13,6 +15,7 @@ const Index = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [elevenLabsKey, setElevenLabsKey] = useState<string | null>(null);
+  const [geminiKey, setGeminiKey] = useState<string | null>(null);
   const { toast } = useToast();
   const audioManager = AudioManager.getInstance();
 
@@ -83,12 +86,59 @@ const Index = () => {
     }
   };
 
-  const handleOptionSelect = (choice: number) => {
+  const handleOptionSelect = async (choice: number) => {
     if (choice === 4) {
       audioManager.stop();
       setMessages([messages[0]]);
       saveToLocalStorage([]);
       setShowOptions(false);
+    } else if (choice === 5) {
+      if (!geminiKey) {
+        toast({
+          title: "Error",
+          description: "Please enter your Gemini API key first",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setIsProcessing(true);
+      setShowOptions(false);
+
+      try {
+        const review = await callArchitectLLM(messages, geminiKey);
+        if (review) {
+          const updatedMessages: Message[] = [
+            ...messages,
+            { type: "system", content: "🔍 Architect Review Requested" },
+            { 
+              type: "reasoning", 
+              content: "Analyzing solution quality, architecture, and potential improvements..." 
+            },
+            { 
+              type: "answer", 
+              content: JSON.stringify(review, null, 2)
+            }
+          ];
+          setMessages(updatedMessages);
+          saveToLocalStorage(updatedMessages.slice(1));
+        } else {
+          toast({
+            title: "Error",
+            description: "Failed to get architect review. Please try again.",
+            variant: "destructive",
+          });
+        }
+      } catch (error) {
+        toast({
+          title: "Error",
+          description: "An unexpected error occurred during review.",
+          variant: "destructive",
+        });
+      } finally {
+        setIsProcessing(false);
+        setShowOptions(true);
+      }
     } else {
       const prompts = {
         1: "Ask a follow-up question",
@@ -99,17 +149,24 @@ const Index = () => {
     }
   };
 
-  if (!apiKey || !elevenLabsKey) {
+  if (!apiKey || !elevenLabsKey || !geminiKey) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         {!apiKey ? (
           <ApiKeyInput onSubmit={setApiKey} />
-        ) : (
+        ) : !elevenLabsKey ? (
           <ApiKeyInput 
             onSubmit={setElevenLabsKey}
             title="Enter ElevenLabs API Key"
             description="Your API key will only be stored in memory during this session."
             placeholder="Your ElevenLabs API key..."
+          />
+        ) : (
+          <ApiKeyInput 
+            onSubmit={setGeminiKey}
+            title="Enter Gemini API Key"
+            description="Your API key will only be stored in memory during this session."
+            placeholder="Your Gemini API key..."
           />
         )}
       </div>
@@ -120,7 +177,11 @@ const Index = () => {
     <div className="min-h-screen flex flex-col max-w-4xl mx-auto p-4">
       <div className="flex-1 overflow-auto space-y-4 mb-4">
         {messages.map((message, index) => (
-          <ChatMessage key={index} type={message.type} content={message.content} />
+          message.type === "answer" && message.content.includes('"criticalIssues"') ? (
+            <ArchitectReview key={index} review={JSON.parse(message.content)} />
+          ) : (
+            <ChatMessage key={index} type={message.type} content={message.content} />
+          )
         ))}
       </div>
       

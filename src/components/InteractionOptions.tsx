@@ -10,6 +10,7 @@ export function InteractionOptions({ onSelect }: InteractionOptionsProps) {
     "Explain reasoning in more detail",
     "Show me examples",
     "Start new topic",
+    "Let architect review the solution",
   ];
 
   return (
