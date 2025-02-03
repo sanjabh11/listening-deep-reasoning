@@ -14,8 +14,27 @@ export interface Message {
 }
 
 const STORAGE_KEY = "chat_history";
+const API_KEYS_STORAGE = "api_keys";
 const MAX_HISTORY = 5;
-const API_URL = "https://api.deepseek.com/v1/chat/completions"; // Fixed API URL
+const API_URL = "https://api.deepseek.com/v1/chat/completions";
+
+export const saveApiKeys = (keys: { [key: string]: string }) => {
+  try {
+    localStorage.setItem(API_KEYS_STORAGE, JSON.stringify(keys));
+  } catch (error) {
+    console.error("Error saving API keys:", error);
+  }
+};
+
+export const loadApiKeys = () => {
+  try {
+    const stored = localStorage.getItem(API_KEYS_STORAGE);
+    return stored ? JSON.parse(stored) : null;
+  } catch (error) {
+    console.error("Error loading API keys:", error);
+    return null;
+  }
+};
 
 export const saveToLocalStorage = (messages: Message[]) => {
   try {

@@ -4,10 +4,12 @@ import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
 import { ApiKeyInput } from "@/components/ApiKeyInput";
 import { ArchitectReview } from "@/components/ArchitectReview";
-import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message } from "@/lib/api";
+import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message, saveApiKeys, loadApiKeys } from "@/lib/api";
 import { callArchitectLLM } from "@/lib/architect";
 import { AudioManager } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
+import { Button } from "@/components/ui/button";
+import { Loader2 } from "lucide-react";
 
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -16,11 +18,20 @@ const Index = () => {
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [elevenLabsKey, setElevenLabsKey] = useState<string | null>(null);
   const [geminiKey, setGeminiKey] = useState<string | null>(null);
+  const [audioEnabled, setAudioEnabled] = useState(true);
   const { toast } = useToast();
   const audioManager = AudioManager.getInstance();
 
   useEffect(() => {
     const savedMessages = loadFromLocalStorage();
+    const savedKeys = loadApiKeys();
+    
+    if (savedKeys) {
+      setApiKey(savedKeys.deepseek);
+      setElevenLabsKey(savedKeys.elevenlabs);
+      setGeminiKey(savedKeys.gemini);
+    }
+
     const initialMessages: Message[] = [
       {
         type: "system",
@@ -30,6 +41,31 @@ const Index = () => {
     ];
     setMessages(initialMessages);
   }, []);
+
+  const handleApiKeySubmit = (key: string) => {
+    setApiKey(key);
+    const currentKeys = loadApiKeys() || {};
+    saveApiKeys({ ...currentKeys, deepseek: key });
+  };
+
+  const handleElevenLabsKeySubmit = (key: string) => {
+    setElevenLabsKey(key);
+    const currentKeys = loadApiKeys() || {};
+    saveApiKeys({ ...currentKeys, elevenlabs: key });
+  };
+
+  const handleGeminiKeySubmit = (key: string) => {
+    setGeminiKey(key);
+    const currentKeys = loadApiKeys() || {};
+    saveApiKeys({ ...currentKeys, gemini: key });
+  };
+
+  const toggleAudio = () => {
+    setAudioEnabled(!audioEnabled);
+    if (!audioEnabled) {
+      audioManager.stop();
+    }
+  };
 
   const handleSend = async (message: string) => {
     if (!apiKey) {
@@ -153,17 +189,17 @@ const Index = () => {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         {!apiKey ? (
-          <ApiKeyInput onSubmit={setApiKey} />
+          <ApiKeyInput onSubmit={handleApiKeySubmit} />
         ) : !elevenLabsKey ? (
           <ApiKeyInput 
-            onSubmit={setElevenLabsKey}
+            onSubmit={handleElevenLabsKeySubmit}
             title="Enter ElevenLabs API Key"
             description="Your API key will only be stored in memory during this session."
             placeholder="Your ElevenLabs API key..."
           />
         ) : (
           <ApiKeyInput 
-            onSubmit={setGeminiKey}
+            onSubmit={handleGeminiKeySubmit}
             title="Enter Gemini API Key"
             description="Your API key will only be stored in memory during this session."
             placeholder="Your Gemini API key..."
@@ -175,6 +211,17 @@ const Index = () => {
 
   return (
     <div className="min-h-screen flex flex-col max-w-4xl mx-auto p-4">
+      <div className="flex justify-end mb-4">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={toggleAudio}
+          className="flex items-center gap-2"
+        >
+          {audioEnabled ? '🔊 Mute' : '🔇 Unmute'}
+        </Button>
+      </div>
+
       <div className="flex-1 overflow-auto space-y-4 mb-4">
         {messages.map((message, index) => (
           message.type === "answer" && message.content.includes('"criticalIssues"') ? (
@@ -183,6 +230,12 @@ const Index = () => {
             <ChatMessage key={index} type={message.type} content={message.content} />
           )
         ))}
+        {isProcessing && (
+          <div className="flex items-center justify-center p-4">
+            <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            <span className="ml-2">Processing...</span>
+          </div>
+        )}
       </div>
       
       {showOptions && <InteractionOptions onSelect={handleOptionSelect} />}

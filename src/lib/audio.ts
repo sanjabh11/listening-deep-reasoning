@@ -31,6 +31,11 @@ export class AudioManager {
   }
 
   async generateAndPlaySpeech(text: string, apiKey: string) {
+    // Don't generate speech for code blocks
+    if (text.includes('```') || text.includes('criticalIssues')) {
+      return;
+    }
+
     try {
       if (!this.hasUserInteracted) {
         toast({
