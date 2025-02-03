@@ -162,7 +162,8 @@ export const callDeepSeek = async (
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${validatedKey}`
+        'Authorization': `Bearer ${validatedKey}`,
+        'Accept': 'application/json'
       },
       signal: controller.signal,
       body: JSON.stringify({
@@ -204,7 +205,6 @@ export const callDeepSeek = async (
       }
     } catch (e) {
       console.error('Failed to parse thought process:', e);
-      // Create a default thought if parsing fails
       const defaultThought: ThoughtProcess = {
         type: 'thinking',
         content: thoughtData?.choices?.[0]?.message?.content || 'Analyzing the problem...',
@@ -219,7 +219,8 @@ export const callDeepSeek = async (
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${validatedKey}`
+        'Authorization': `Bearer ${validatedKey}`,
+        'Accept': 'application/json'
       },
       signal: controller.signal,
       body: JSON.stringify({
@@ -260,6 +261,8 @@ export const callDeepSeek = async (
     };
 
   } catch (error) {
+    console.error('DeepSeek API Error:', error);
+
     if (error.name === 'AbortError') {
       return {
         content: "The request took too long to process.",
@@ -280,6 +283,11 @@ export const callDeepSeek = async (
       };
     }
 
-    throw error;
+    return {
+      content: "The AI service encountered an error. Please try again in a moment.",
+      reasoning: error.message || "Unknown error",
+      thoughtProcess: [],
+      status: 'error'
+    };
   }
 };
