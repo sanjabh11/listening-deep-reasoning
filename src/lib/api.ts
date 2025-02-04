@@ -420,11 +420,61 @@ export const callDeepSeek = async (
         throw new Error('Empty response from API');
       }
 
-      // Add solution to context
-      previousMessages.push({
-        type: 'answer',
+      // Add solution to context before architect review
+      const solutionMessage = {
+        type: 'answer' as MessageType,
         content: solutionContent
+      };
+      
+      previousMessages.push(solutionMessage);
+
+      // Now get architect review with complete context including the solution
+      const architectResponse = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            {
+              role: "system",
+              content: `You are in ARCHITECT REVIEW mode. Review the complete conversation including the assistant's solution.
+                       Format your response with these sections:
+                       1. Solution Quality: [Evaluate the correctness and completeness]
+                       2. Architecture Review: [Review the solution approach]
+                       3. Potential Improvements: [Suggest any improvements]
+                       4. Verdict: [APPROVED or NEEDS_REVISION with reason]`
+            },
+            {
+              role: "user",
+              content: formatMessagesForArchitect({
+                ...context,
+                relevantHistory: [...context.relevantHistory, solutionMessage]
+              })
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 2000,
+          stream: false
+        })
       });
+
+      if (!architectResponse.ok) {
+        throw new Error(`Architect API Error: ${architectResponse.status}`);
+      }
+
+      const architectData = await architectResponse.json();
+      const architectReview = architectData?.choices?.[0]?.message?.content;
+
+      // Add architect review to context
+      if (architectReview) {
+        previousMessages.push({
+          type: 'system',
+          content: `🔍 Architect Review:\n${architectReview}`
+        });
+      }
 
       return {
         status: 'complete',

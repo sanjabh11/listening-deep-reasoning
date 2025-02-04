@@ -99,6 +99,18 @@ export const formatMessagesForArchitect = (context: MessageContext): string => {
     '=== CURRENT QUESTION ===',
     context.lastUserMessage?.content || context.originalQuestion || 'No question found',
     '',
+    '=== ASSISTANT SOLUTION ===',
+    // Find the most recent solution
+    context.relevantHistory
+      .filter(m => m.type === 'answer')
+      .slice(-1)[0]?.content || 'No solution provided yet',
+    '',
+    '=== ASSISTANT REASONING ===',
+    // Find the most recent reasoning
+    context.relevantHistory
+      .filter(m => m.type === 'reasoning')
+      .slice(-1)[0]?.content || 'No reasoning provided yet',
+    '',
     '=== COMPLETE CONVERSATION HISTORY ===',
     ...context.relevantHistory.map((m, i) => {
       const timestamp = new Date(context.processedAt).toISOString();
@@ -108,7 +120,7 @@ export const formatMessagesForArchitect = (context: MessageContext): string => {
           prefix = '👤 User:';
           break;
         case 'answer':
-          prefix = '🤖 Assistant:';
+          prefix = '🤖 Solution:';
           break;
         case 'reasoning':
           prefix = '💭 Reasoning:';
