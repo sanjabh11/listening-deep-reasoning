@@ -12,6 +12,7 @@ interface MessageContext {
     hasOriginalQuestion: boolean;
     hasFailedAttempts: boolean;
     historyLength: number;
+    messageTypeBreakdown: Record<string, number>;
   };
 }
 
@@ -40,18 +41,64 @@ const isSystemMessage = (message: Message): boolean => {
   );
 };
 
+const MESSAGE_PREFIXES: Record<string, string> = {
+  user: '👤 User',
+  answer: '🤖 Solution',
+  reasoning: '💭 Analysis',
+  system: '⚙️ System'
+};
+
+const formatMessageContent = (message: Message): string => {
+  // Remove any existing emoji prefixes
+  let content = message.content.replace(/^[👤🤖💭⚙️📝]\s*/, '');
+  
+  // Format based on message type
+  switch (message.type) {
+    case 'reasoning':
+    case 'answer':
+      // Ensure consistent markdown formatting
+      if (!content.startsWith('###')) {
+        content = content.split('\n').map(line => {
+          if (line.match(/^\d+\./)) {
+            return `### ${line}`;
+          }
+          return line;
+        }).join('\n');
+      }
+      break;
+    case 'system':
+      // Clean up system messages
+      content = content.replace(/^Architect Review:\s*/, '');
+      break;
+  }
+  
+  return content;
+};
+
 export const processMessageContext = (messages: Message[]): MessageContext => {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    console.warn('Invalid or empty message array');
+    return createEmptyContext();
+  }
+
+  // Filter and validate user messages
   const userMessages = messages.filter(m => m.type === 'user');
+  if (userMessages.length === 0) {
+    console.warn('No user messages found in chain');
+    return createEmptyContext();
+  }
+
   const originalQuestion = userMessages[0]?.content || '';
   const lastUserMessage = userMessages[userMessages.length - 1] || null;
-  
-  // Include all messages in relevant history, maintaining chronological order
-  const relevantHistory = messages.map(m => ({
-    type: m.type,
-    content: m.content
-  }));
 
-  // Check for failed attempts by looking for error messages or architect escalations
+  // Group messages by type for better organization
+  const messagesByType = messages.reduce((acc, m) => {
+    acc[m.type] = acc[m.type] || [];
+    acc[m.type].push(m);
+    return acc;
+  }, {} as Record<string, Message[]>);
+
+  // Check for failed attempts or errors
   const hasFailedAttempts = messages.some(m => 
     (m.type === 'system' && (
       m.content.includes('Error') || 
@@ -61,30 +108,62 @@ export const processMessageContext = (messages: Message[]): MessageContext => {
     ))
   );
 
-  const context: MessageContext = {
+  // Create debug information
+  const debug = {
+    messageCount: messages.length,
+    userMessageCount: userMessages.length,
+    processedAt: new Date().toISOString(),
+    hasOriginalQuestion: !!originalQuestion,
+    hasFailedAttempts,
+    historyLength: messages.length,
+    messageTypeBreakdown: Object.fromEntries(
+      Object.entries(messagesByType).map(([type, msgs]) => [type, msgs.length])
+    )
+  };
+
+  // Log context processing for debugging
+  console.debug('Processing message context:', {
+    messageCount: messages.length,
+    messageTypes: Object.keys(messagesByType),
+    hasUserMessages: userMessages.length > 0,
+    hasOriginalQuestion: !!originalQuestion,
+    debug
+  });
+
+  return {
     originalQuestion,
-    relevantHistory,
+    relevantHistory: messages,
     hasFailedAttempts,
     lastUserMessage,
     messageCount: messages.length,
     userMessageCount: userMessages.length,
     processedAt: new Date().toISOString(),
     hasOriginalQuestion: !!originalQuestion,
-    historyLength: relevantHistory.length
+    historyLength: messages.length,
+    debug
   };
-
-  // Add debug information
-  context.debug = {
-    messageCount: messages.length,
-    userMessageCount: userMessages.length,
-    processedAt: new Date().toISOString(),
-    hasOriginalQuestion: !!originalQuestion,
-    hasFailedAttempts,
-    historyLength: relevantHistory.length
-  };
-
-  return context;
 };
+
+const createEmptyContext = (): MessageContext => ({
+  originalQuestion: '',
+  relevantHistory: [],
+  hasFailedAttempts: false,
+  lastUserMessage: null,
+  messageCount: 0,
+  userMessageCount: 0,
+  processedAt: new Date().toISOString(),
+  hasOriginalQuestion: false,
+  historyLength: 0,
+  debug: {
+    messageCount: 0,
+    userMessageCount: 0,
+    processedAt: new Date().toISOString(),
+    hasOriginalQuestion: false,
+    hasFailedAttempts: false,
+    historyLength: 0,
+    messageTypeBreakdown: {}
+  }
+});
 
 export const formatMessagesForArchitect = (context: MessageContext): string => {
   const sections = [
@@ -92,46 +171,29 @@ export const formatMessagesForArchitect = (context: MessageContext): string => {
     context.originalQuestion || 'No original question found',
     '',
     '=== CURRENT STATUS ===',
-    `Messages: ${context.messageCount}`,
+    `Total Messages: ${context.messageCount}`,
     `User Messages: ${context.userMessageCount}`,
     `Failed Attempts: ${context.hasFailedAttempts ? 'Yes' : 'No'}`,
     '',
     '=== CURRENT QUESTION ===',
     context.lastUserMessage?.content || context.originalQuestion || 'No question found',
     '',
-    '=== ASSISTANT SOLUTION ===',
-    // Find the most recent solution
-    context.relevantHistory
+    '=== SOLUTION STATUS ===',
+    ...context.relevantHistory
       .filter(m => m.type === 'answer')
-      .slice(-1)[0]?.content || 'No solution provided yet',
+      .map(m => formatMessageContent(m)),
     '',
-    '=== ASSISTANT REASONING ===',
-    // Find the most recent reasoning
-    context.relevantHistory
+    '=== ANALYSIS ===',
+    ...context.relevantHistory
       .filter(m => m.type === 'reasoning')
-      .slice(-1)[0]?.content || 'No reasoning provided yet',
+      .map(m => formatMessageContent(m)),
     '',
     '=== COMPLETE CONVERSATION HISTORY ===',
-    ...context.relevantHistory.map((m, i) => {
+    ...context.relevantHistory.map(m => {
       const timestamp = new Date(context.processedAt).toISOString();
-      let prefix;
-      switch (m.type) {
-        case 'user':
-          prefix = '👤 User:';
-          break;
-        case 'answer':
-          prefix = '🤖 Solution:';
-          break;
-        case 'reasoning':
-          prefix = '💭 Reasoning:';
-          break;
-        case 'system':
-          prefix = '⚙️ System:';
-          break;
-        default:
-          prefix = '📝';
-      }
-      return `[${timestamp}] ${prefix} ${m.content}`;
+      const prefix = MESSAGE_PREFIXES[m.type] || '📝';
+      const content = formatMessageContent(m);
+      return `[${timestamp}] ${prefix}: ${content}`;
     }),
     '',
     '=== DEBUG INFO ===',

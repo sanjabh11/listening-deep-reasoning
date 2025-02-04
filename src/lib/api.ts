@@ -283,6 +283,76 @@ const handleStreamResponse = async (
   return fullContent;
 };
 
+// Add message chain validation
+const validateMessageChain = (messages: Message[]): Message[] => {
+  if (!Array.isArray(messages)) {
+    console.warn('Invalid message array');
+    return [];
+  }
+
+  // Track message sequence
+  const sequence: Record<MessageType, number> = {
+    user: 0,
+    reasoning: 0,
+    answer: 0,
+    system: 0
+  };
+
+  // Group messages by conversation
+  const conversations: Message[][] = [];
+  let currentConversation: Message[] = [];
+
+  for (const message of messages) {
+    sequence[message.type]++;
+
+    // Start new conversation on user message
+    if (message.type === 'user') {
+      if (currentConversation.length > 0) {
+        conversations.push(currentConversation);
+      }
+      currentConversation = [message];
+    } else {
+      currentConversation.push(message);
+    }
+  }
+
+  // Add last conversation
+  if (currentConversation.length > 0) {
+    conversations.push(currentConversation);
+  }
+
+  // Validate and clean each conversation
+  const validatedMessages = conversations.flatMap(conv => {
+    const userMsg = conv.find(m => m.type === 'user');
+    if (!userMsg) return [];
+
+    // Get latest reasoning and answer
+    const reasoning = conv.filter(m => m.type === 'reasoning').pop();
+    const answer = conv.filter(m => m.type === 'answer').pop();
+    
+    // Get relevant system messages
+    const systemMsgs = conv
+      .filter(m => m.type === 'system')
+      .filter(m => !m.content.includes('Retrying')); // Filter out retry messages
+
+    return [
+      userMsg,
+      ...(reasoning ? [reasoning] : []),
+      ...(answer ? [answer] : []),
+      ...systemMsgs
+    ];
+  });
+
+  console.debug('Message Chain Validation:', {
+    originalCount: messages.length,
+    validatedCount: validatedMessages.length,
+    sequence,
+    conversations: conversations.length
+  });
+
+  return validatedMessages;
+};
+
 export const callDeepSeek = async (
   message: string,
   apiKey: string,
@@ -306,11 +376,13 @@ export const callDeepSeek = async (
     });
   };
 
+  const validatedMessages = validateMessageChain(previousMessages);
+
   while (retryCount <= API_TIMEOUTS.MAX_RETRIES) {
     try {
-      // Create context with ALL messages including system messages
+      // Create context with validated messages
       const context = processMessageContext([
-        ...previousMessages,
+        ...validatedMessages,
         { type: 'user', content: message }
       ]);
       
@@ -374,7 +446,7 @@ export const callDeepSeek = async (
 
       // Update context with new messages
       const updatedContext = processMessageContext([
-        ...previousMessages,
+        ...validatedMessages,
         { type: 'user', content: message }
       ]);
 
@@ -420,15 +492,35 @@ export const callDeepSeek = async (
         throw new Error('Empty response from API');
       }
 
-      // Add solution to context before architect review
-      const solutionMessage = {
-        type: 'answer' as MessageType,
-        content: solutionContent
+      // Add solution to context with proper type handling
+      const solutionMessage: Message = {
+        type: 'answer',
+        content: solutionContent.replace(/^🤖\s*/, '') // Remove emoji if present
       };
       
-      previousMessages.push(solutionMessage);
+      // Add reasoning to context with proper type handling
+      const reasoningMessage: Message = {
+        type: 'reasoning',
+        content: thoughtContent?.replace(/^💭\s*/, '') || 'Analysis complete' // Remove emoji if present
+      };
+      
+      // Update message chain with proper ordering
+      const updatedMessages = [
+        ...validatedMessages,
+        reasoningMessage,
+        solutionMessage
+      ];
 
-      // Now get architect review with complete context including the solution
+      // Get architect review with complete context
+      const architectContext = processMessageContext(updatedMessages);
+      
+      console.debug('Architect Review Context:', {
+        messageCount: architectContext.messageCount,
+        messageTypes: architectContext.relevantHistory.map(m => m.type),
+        hasUserMessage: architectContext.lastUserMessage !== null,
+        hasSolution: architectContext.relevantHistory.some(m => m.type === 'answer')
+      });
+
       const architectResponse = await fetch(API_URL, {
         method: "POST",
         headers: {
@@ -440,19 +532,21 @@ export const callDeepSeek = async (
           messages: [
             {
               role: "system",
-              content: `You are in ARCHITECT REVIEW mode. Review the complete conversation including the assistant's solution.
+              content: `You are in ARCHITECT REVIEW mode. Analyze the complete conversation including the assistant's solution.
+                       The context includes:
+                       1. Original user question
+                       2. Assistant's reasoning
+                       3. Assistant's solution
+                       
                        Format your response with these sections:
-                       1. Solution Quality: [Evaluate the correctness and completeness]
-                       2. Architecture Review: [Review the solution approach]
-                       3. Potential Improvements: [Suggest any improvements]
+                       1. Solution Quality: [Evaluate correctness and completeness]
+                       2. Architecture Review: [Review solution approach]
+                       3. Potential Improvements: [Suggest improvements]
                        4. Verdict: [APPROVED or NEEDS_REVISION with reason]`
             },
             {
               role: "user",
-              content: formatMessagesForArchitect({
-                ...context,
-                relevantHistory: [...context.relevantHistory, solutionMessage]
-              })
+              content: formatMessagesForArchitect(architectContext)
             }
           ],
           temperature: 0.7,
@@ -468,21 +562,21 @@ export const callDeepSeek = async (
       const architectData = await architectResponse.json();
       const architectReview = architectData?.choices?.[0]?.message?.content;
 
-      // Add architect review to context
+      // Add architect review to context with proper type
       if (architectReview) {
-        previousMessages.push({
+        updatedMessages.push({
           type: 'system',
-          content: `🔍 Architect Review:\n${architectReview}`
+          content: architectReview.replace(/^🔍\s*/, '') // Remove emoji if present
         });
       }
 
       return {
         status: 'complete',
         content: solutionContent,
-        reasoning: thoughtContent || 'Analysis complete',
+        reasoning: reasoningMessage.content,
         thoughtProcess: [{
           type: 'thinking',
-          content: thoughtContent || 'Processing complete',
+          content: reasoningMessage.content,
           timestamp: Date.now()
         }]
       };
@@ -492,26 +586,45 @@ export const callDeepSeek = async (
       lastError = error;
       retryCount++;
       
+      // Add detailed error logging
+      const errorDetails = {
+        attempt: retryCount,
+        errorType: error.name,
+        errorMessage: error.message,
+        contextState: {
+          messageCount: validatedMessages.length,
+          hasUserMessage: validatedMessages.some(m => m.type === 'user'),
+          lastMessageType: validatedMessages[validatedMessages.length - 1]?.type
+        }
+      };
+      console.debug('API Error Details:', errorDetails);
+      
       if (retryCount <= API_TIMEOUTS.MAX_RETRIES) {
-        const retryMessage = `Retrying... Attempt ${retryCount + 1}/${API_TIMEOUTS.MAX_RETRIES}`;
+        const retryDelay = getRetryDelay(retryCount);
+        const retryMessage = `Retrying... Attempt ${retryCount + 1}/${API_TIMEOUTS.MAX_RETRIES + 1}. Waiting ${retryDelay}ms`;
         updateThought(retryMessage);
-        await sleep(getRetryDelay(retryCount));
+        
+        // Clean up message chain before retry
+        previousMessages = validateMessageChain(previousMessages);
+        
+        await sleep(retryDelay);
       } else {
-        // On final retry, check for escalation
+        // On final retry, check for escalation with more context
         const escalationCheck = shouldEscalateToArchitect(
           message,
           error.message,
           retryCount,
-          previousMessages
+          validatedMessages,
+          errorDetails
         );
 
         if (escalationCheck.shouldEscalate) {
           return {
             status: 'complete',
             shouldEscalateToArchitect: true,
-            escalationReason: escalationCheck.reason,
+            escalationReason: `${escalationCheck.reason}\nError Details: ${JSON.stringify(errorDetails, null, 2)}`,
             content: '',
-            reasoning: `Escalating to architect: ${escalationCheck.reason}`
+            reasoning: `Escalating to architect due to persistent errors: ${escalationCheck.reason}`
           };
         }
       }
