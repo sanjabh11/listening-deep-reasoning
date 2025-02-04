@@ -1,10 +1,14 @@
-import { ArchitectReview as ArchitectReviewType } from "@/lib/architect";
+import { ArchitectReviewType } from "@/lib/types";
+import { RevisionButton } from "./RevisionButton";
 
 interface ArchitectReviewProps {
   review: ArchitectReviewType;
+  onRevisionRequest?: () => void;
+  isProcessing?: boolean;
+  revisionNumber?: number;
 }
 
-export function ArchitectReview({ review }: ArchitectReviewProps) {
+export function ArchitectReview({ review, onRevisionRequest, isProcessing, revisionNumber = 1 }: ArchitectReviewProps) {
   return (
     <div className="space-y-4 p-4 bg-card rounded-lg border">
       <div className="space-y-2">
@@ -41,6 +45,14 @@ export function ArchitectReview({ review }: ArchitectReviewProps) {
             {review.verdict}
           </span>
         </div>
+        {review.verdict === "NEEDS_REVISION" && onRevisionRequest && (
+          <RevisionButton
+            onClick={onRevisionRequest}
+            isProcessing={isProcessing}
+            revisionNumber={revisionNumber}
+            improvements={review.improvements}
+          />
+        )}
       </div>
     </div>
   );

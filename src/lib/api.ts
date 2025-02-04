@@ -20,6 +20,8 @@ export interface ApiResponse {
   thoughtProcess?: ThoughtProcess[];
   status: 'complete' | 'timeout' | 'error';
   timeoutReason?: string;
+  shouldEscalateToArchitect?: boolean;
+  escalationReason?: string;
 }
 
 export type MessageType = "user" | "reasoning" | "answer" | "system";
@@ -40,6 +42,45 @@ const VALIDATION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 const TIMEOUT_DURATION = 120000; // 120 seconds
 const ARCHITECT_TIMEOUT = 120000; // 120 seconds for architect review
+
+const MAX_RETRIES = 2;
+const RETRY_DELAY = 2000; // 2 seconds
+
+interface AutoEscalationResult {
+  shouldEscalate: boolean;
+  reason: string;
+}
+
+const checkForAutoEscalation = (error: any, retryCount: number): AutoEscalationResult => {
+  // Check for specific error conditions that warrant automatic escalation
+  if (error instanceof SyntaxError && error.message.includes('JSON')) {
+    return {
+      shouldEscalate: true,
+      reason: "JSON parsing error in API response"
+    };
+  }
+
+  if (error.message?.includes('Empty response')) {
+    return {
+      shouldEscalate: true,
+      reason: "Empty or incomplete response from API"
+    };
+  }
+
+  if (retryCount >= MAX_RETRIES) {
+    return {
+      shouldEscalate: true,
+      reason: `Failed after ${MAX_RETRIES} attempts`
+    };
+  }
+
+  return {
+    shouldEscalate: false,
+    reason: ""
+  };
+};
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const saveApiKeys = (keys: { [key: string]: string }) => {
   try {
@@ -147,51 +188,52 @@ const cleanJsonString = (str: string): string => {
 };
 
 export const callDeepSeek = async (
-  prompt: string, 
-  apiKey: string, 
-  previousMessages: Message[] = [],
-  onThoughtUpdate?: (thought: ThoughtProcess) => void
+  message: string,
+  apiKey: string,
+  context: Message[] = [],
+  onThoughtUpdate?: (thought: any) => void,
+  retryCount: number = 0
 ): Promise<ApiResponse> => {
   try {
     const validatedKey = validateApiKey(apiKey);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_DURATION);
+    const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes timeout
 
-    // First, get the thought process
-    const thoughtResponse = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${validatedKey}`,
-        'Accept': 'application/json'
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { 
-            role: "system", 
-            content: "You are in THINKING mode. Break down the problem step by step. Return your response in this exact JSON format without any markdown:\n{\"type\": \"thinking\", \"content\": \"your detailed thought process here\"}"
-          },
-          ...previousMessages.map(msg => ({
-            role: msg.type === 'user' ? 'user' : 'assistant',
-            content: msg.content
-          })),
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 1000
-      })
-    });
-
-    if (!thoughtResponse.ok) {
-      throw new Error(`API error: ${thoughtResponse.status}`);
-    }
-
-    const thoughtData = await thoughtResponse.json();
-    const thoughts: ThoughtProcess[] = [];
-    
+    // First attempt to get thought process
     try {
+      const thoughtResponse = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${validatedKey}`,
+          'Accept': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            { 
+              role: "system", 
+              content: "You are in THINKING mode. Break down the problem step by step. Return your response in this exact JSON format without any markdown:\n{\"type\": \"thinking\", \"content\": \"your detailed thought process here\"}"
+            },
+            ...context.map(msg => ({
+              role: msg.type === 'user' ? 'user' : 'assistant',
+              content: msg.content
+            })),
+            { role: "user", content: message }
+          ],
+          temperature: 0.7,
+          max_tokens: 2000
+        })
+      });
+
+      if (!thoughtResponse.ok) {
+        throw new Error(`API error: ${thoughtResponse.status}`);
+      }
+
+      const thoughtData = await thoughtResponse.json();
+      const thoughts: ThoughtProcess[] = [];
+      
       if (thoughtData?.choices?.[0]?.message?.content) {
         const cleanedJson = cleanJsonString(thoughtData.choices[0].message.content);
         const thoughtContent = JSON.parse(cleanedJson);
@@ -203,83 +245,90 @@ export const callDeepSeek = async (
         thoughts.push(thought);
         onThoughtUpdate?.(thought);
       }
-    } catch (e) {
-      console.error('Failed to parse thought process:', e);
-      const defaultThought: ThoughtProcess = {
-        type: 'thinking',
-        content: thoughtData?.choices?.[0]?.message?.content || 'Analyzing the problem...',
-        timestamp: Date.now()
+
+      // Get solution with chunked streaming
+      const solutionResponse = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${validatedKey}`,
+          'Accept': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            { 
+              role: "system", 
+              content: "You are in SOLUTION mode. Provide a clear, direct answer to the problem."
+            },
+            ...context.map(msg => ({
+              role: msg.type === 'user' ? 'user' : 'assistant',
+              content: msg.content
+            })),
+            { role: "user", content: message }
+          ],
+          temperature: 0.7,
+          max_tokens: 4000
+        })
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!solutionResponse.ok) {
+        throw new Error(`API error: ${solutionResponse.status}`);
+      }
+
+      const solutionData = await solutionResponse.json();
+      
+      if (!solutionData?.choices?.[0]?.message?.content) {
+        throw new Error('Empty response from API');
+      }
+
+      return {
+        content: solutionData.choices[0].message.content,
+        reasoning: "Analysis complete",
+        thoughtProcess: thoughts,
+        status: 'complete'
       };
-      thoughts.push(defaultThought);
-      onThoughtUpdate?.(defaultThought);
+
+    } catch (innerError) {
+      // Check if we should retry or escalate
+      const { shouldEscalate, reason } = checkForAutoEscalation(innerError, retryCount);
+      
+      if (shouldEscalate) {
+        return {
+          content: "I encountered difficulties processing your request.",
+          reasoning: reason,
+          thoughtProcess: [],
+          status: 'error',
+          shouldEscalateToArchitect: true,
+          escalationReason: reason
+        };
+      }
+
+      // If not escalating, retry after delay
+      if (retryCount < MAX_RETRIES) {
+        await delay(RETRY_DELAY);
+        return callDeepSeek(message, apiKey, context, onThoughtUpdate, retryCount + 1);
+      }
     }
 
-    // Now get the actual solution
-    const solutionResponse = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${validatedKey}`,
-        'Accept': 'application/json'
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { 
-            role: "system", 
-            content: "You are in SOLUTION mode. Provide a clear, direct answer to the problem. No need for JSON formatting."
-          },
-          ...previousMessages.map(msg => ({
-            role: msg.type === 'user' ? 'user' : 'assistant',
-            content: msg.content
-          })),
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 2000
-      })
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!solutionResponse.ok) {
-      throw new Error(`API error: ${solutionResponse.status}`);
-    }
-
-    const solutionData = await solutionResponse.json();
-    
-    if (!solutionData?.choices?.[0]?.message?.content) {
-      throw new Error('Invalid response format: missing content');
-    }
-
-    return {
-      content: solutionData.choices[0].message.content,
-      reasoning: "Analysis complete",
-      thoughtProcess: thoughts,
-      status: 'complete'
-    };
+    throw new Error('Failed to process request');
 
   } catch (error) {
     console.error('DeepSeek API Error:', error);
 
-    if (error.name === 'AbortError') {
-      return {
-        content: "The request took too long to process.",
-        reasoning: "Request timed out after 120 seconds",
-        thoughtProcess: [],
-        status: 'timeout',
-        timeoutReason: 'The model took too long to generate a response. Would you like to escalate this to an architect review?'
-      };
-    }
+    const { shouldEscalate, reason } = checkForAutoEscalation(error, retryCount);
 
-    // Handle JSON parsing errors
-    if (error instanceof SyntaxError) {
+    if (shouldEscalate) {
       return {
-        content: "I encountered an error processing the response. Let me try a simpler approach.",
-        reasoning: "Error parsing response",
+        content: "The AI service encountered difficulties.",
+        reasoning: reason,
         thoughtProcess: [],
-        status: 'error'
+        status: 'error',
+        shouldEscalateToArchitect: true,
+        escalationReason: reason
       };
     }
 
@@ -290,4 +339,31 @@ export const callDeepSeek = async (
       status: 'error'
     };
   }
+};
+
+// Add history storage functions
+export const saveHistory = (messages: Message[]) => {
+  try {
+    const history = {
+      messages,
+      timestamp: new Date().toISOString(),
+      version: '1.0'
+    };
+    localStorage.setItem('chat_history', JSON.stringify(history));
+  } catch (error) {
+    console.error('Failed to save chat history:', error);
+  }
+};
+
+export const loadHistory = (): Message[] => {
+  try {
+    const savedHistory = localStorage.getItem('chat_history');
+    if (savedHistory) {
+      const history = JSON.parse(savedHistory);
+      return history.messages || [];
+    }
+  } catch (error) {
+    console.error('Failed to load chat history:', error);
+  }
+  return [];
 };

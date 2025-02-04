@@ -4,44 +4,33 @@ import { ChatInput } from "@/components/ChatInput";
 import { InteractionOptions } from "@/components/InteractionOptions";
 import { ApiKeyManager } from "@/components/ApiKeyManager";
 import { ArchitectReview } from "@/components/ArchitectReview";
-import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message, saveApiKeys, loadApiKeys } from "@/lib/api";
+import { callDeepSeek, saveToLocalStorage, loadFromLocalStorage, Message, saveApiKeys, loadApiKeys, loadHistory, saveHistory } from "@/lib/api";
 import { callArchitectLLM } from "@/lib/architect";
 import { AudioManager } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { ToastAction } from "@/components/ui/toast";
 import { Loader2, Volume2, VolumeX } from "lucide-react";
+import { ApiKeys, ArchitectReviewType } from "@/lib/types";
 
 const AUDIO_ENABLED_KEY = 'audio_enabled';
 const API_KEY_CHECK_INTERVAL = 30000; // 30 seconds
 
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [showOptions, setShowOptions] = useState(false);
+  const [showOptions, setShowOptions] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [apiKeys, setApiKeys] = useState<{
-    deepseek: string | null;
-    elevenlabs: string | null;
-    gemini: string | null;
-  }>({
-    deepseek: null,
-    elevenlabs: null,
-    gemini: null
-  });
-  
-  const [audioEnabled, setAudioEnabled] = useState(() => {
-    const saved = localStorage.getItem(AUDIO_ENABLED_KEY);
-    return saved ? JSON.parse(saved) : false;
-  });
-  
-  const [showApiKeyManager, setShowApiKeyManager] = useState(false);
+  const [apiKeys, setApiKeys] = useState<ApiKeys>(() => loadApiKeys());
+  const [showApiKeyManager, setShowApiKeyManager] = useState(!loadApiKeys()?.deepseek);
+  const [audioEnabled, setAudioEnabled] = useState(() => localStorage.getItem('audio_enabled') !== 'false');
+  const [revisionCount, setRevisionCount] = useState(1);
   
   const { toast } = useToast();
   const audioManager = AudioManager.getInstance();
 
   // Load saved data on mount
   useEffect(() => {
-    const savedMessages = loadFromLocalStorage();
+    const savedMessages = loadHistory();
     const savedKeys = loadApiKeys();
     
     if (savedKeys) {
@@ -56,6 +45,13 @@ const Index = () => {
       setMessages(savedMessages);
     }
   }, []);
+
+  // Save messages whenever they change
+  useEffect(() => {
+    if (messages.length > 1) { // Don't save if only system message
+      saveHistory(messages);
+    }
+  }, [messages]);
 
   // Save audio preference
   useEffect(() => {
@@ -124,17 +120,34 @@ const Index = () => {
     try {
       // Handle thought process updates
       const onThoughtUpdate = (thought: any) => {
-        const thoughtMessage: Message = {
-          type: "system",
-          content: `${getThoughtEmoji(thought.type)} ${thought.content}`
-        };
         setMessages(prev => {
-          // Replace thinking indicator or add new thought
+          // Find the last message
           const lastMsg = prev[prev.length - 1];
-          if (lastMsg.type === "system" && (lastMsg.content.includes("🤔") || lastMsg.content.includes("💭"))) {
-            return [...prev.slice(0, -1), thoughtMessage];
+          
+          // If it's a thinking indicator or another thought, replace it
+          if (lastMsg.type === "system" && 
+              (lastMsg.content.includes("🤔") || 
+               lastMsg.content.includes("💭") || 
+               lastMsg.content.includes("📝") || 
+               lastMsg.content.includes("🔍") || 
+               lastMsg.content.includes("⚡"))) {
+            return [
+              ...prev.slice(0, -1),
+              { 
+                type: "system", 
+                content: `${getThoughtEmoji(thought.type)} ${thought.content}`
+              }
+            ];
           }
-          return [...prev, thoughtMessage];
+          
+          // Otherwise, add as a new message
+          return [
+            ...prev,
+            { 
+              type: "system", 
+              content: `${getThoughtEmoji(thought.type)} ${thought.content}`
+            }
+          ];
         });
       };
 
@@ -144,7 +157,35 @@ const Index = () => {
         messages.slice(-4), // Keep last 4 messages for context
         onThoughtUpdate
       );
-      
+
+      // Handle automatic escalation
+      if (response.shouldEscalateToArchitect) {
+        const escalationMessages: Message[] = [
+          ...newMessages,
+          { 
+            type: "system", 
+            content: `⚠️ ${response.escalationReason || "An error occurred. Requesting architect solution..."}`
+          }
+        ];
+        setMessages(escalationMessages);
+        
+        // Automatically trigger architect in solve mode
+        if (apiKeys.gemini) {
+          await handleArchitectEscalation(message, 'solve');
+        } else {
+          toast({
+            title: "Architect Solution Required",
+            description: "The AI encountered issues. Please set up Gemini API key to get architect solution.",
+            action: (
+              <ToastAction altText="Open Settings" onClick={() => setShowApiKeyManager(true)}>
+                Open Settings
+              </ToastAction>
+            )
+          });
+        }
+        return;
+      }
+
       if (response.status === 'timeout') {
         // Handle timeout with architect escalation option
         const timeoutMessages: Message[] = [
@@ -168,14 +209,16 @@ const Index = () => {
           duration: 10000 // Show for 10 seconds
         });
       } else if (response.status === 'complete') {
-        const updatedMessages: Message[] = [
-          ...newMessages
-        ];
+        // Remove the thinking indicator
+        const updatedMessages = messages.filter(m => 
+          !(m.type === "system" && m.content.includes("🤔"))
+        );
 
         // Add thought process if available
+        const finalMessages = [...updatedMessages];
         if (response.thoughtProcess?.length) {
           response.thoughtProcess.forEach(thought => {
-            updatedMessages.push({
+            finalMessages.push({
               type: "system",
               content: `${getThoughtEmoji(thought.type)} ${thought.content}`
             });
@@ -183,13 +226,13 @@ const Index = () => {
         }
 
         // Add final response
-        updatedMessages.push(
+        finalMessages.push(
           { type: "reasoning", content: response.reasoning },
           { type: "answer", content: response.content }
         );
 
-        setMessages(updatedMessages);
-        saveToLocalStorage(updatedMessages.slice(1));
+        setMessages(finalMessages);
+        saveHistory(finalMessages);
 
         if (audioEnabled && apiKeys.elevenlabs) {
           try {
@@ -234,14 +277,14 @@ const Index = () => {
         }
       ];
       setMessages(errorMessages);
-      saveToLocalStorage(errorMessages.slice(1));
+      saveHistory(errorMessages);
     } finally {
       setIsProcessing(false);
       setShowOptions(true);
     }
   };
 
-  const handleArchitectEscalation = async (originalMessage: string) => {
+  const handleArchitectEscalation = async (originalMessage: string, mode: 'review' | 'solve' = 'review') => {
     if (!apiKeys.gemini) {
       toast({
         title: "Architect Review Unavailable",
@@ -258,22 +301,66 @@ const Index = () => {
     setIsProcessing(true);
     setMessages(prev => [...prev, { 
       type: "system", 
-      content: "👨‍💻 Escalating to architect review..." 
+      content: mode === 'review' ? "👨‍💻 Escalating to architect review..." : "👨‍💻 Requesting architect solution..." 
     }]);
 
     try {
-      const review = await callArchitectLLM(messages, apiKeys.gemini);
+      const review = await callArchitectLLM(messages, apiKeys.gemini, mode);
       if (review) {
-        setMessages(prev => [...prev.filter(m => m.content !== "👨‍💻 Escalating to architect review..."), { 
-          type: "answer", 
-          content: `🏗️ Architect Review:\n\n${review.content}` 
-        }]);
+        // Remove the escalation message
+        const updatedMessages = messages.filter(m => 
+          !m.content.includes("Escalating to architect") && 
+          !m.content.includes("Requesting architect")
+        );
+
+        if (mode === 'solve') {
+          // For solve mode, focus on the solution
+          if (review.solution) {
+            setMessages([
+              ...updatedMessages,
+              { 
+                type: "system", 
+                content: "🏗️ Architect Solution:" 
+              },
+              {
+                type: "answer",
+                content: review.solution
+              }
+            ]);
+          } else {
+            // If no solution provided, show the review
+            setMessages([
+              ...updatedMessages,
+              { 
+                type: "system", 
+                content: "⚠️ Architect could not provide a solution:" 
+              },
+              {
+                type: "answer",
+                content: JSON.stringify(review, null, 2)
+              }
+            ]);
+          }
+        } else {
+          // For review mode, show the full review
+          setMessages([
+            ...updatedMessages,
+            { 
+              type: "system", 
+              content: "🏗️ Architect Review:" 
+            },
+            {
+              type: "answer",
+              content: JSON.stringify(review, null, 2)
+            }
+          ]);
+        }
       }
     } catch (error) {
       console.error("Architect review failed:", error);
       toast({
-        title: "Architect Review Failed",
-        description: "Unable to get architect review at this time. Please try again later.",
+        title: mode === 'review' ? "Architect Review Failed" : "Architect Solution Failed",
+        description: "Unable to get architect response at this time. Please try again later.",
         variant: "destructive"
       });
     } finally {
@@ -284,7 +371,7 @@ const Index = () => {
   const handleOptionSelect = async (choice: number) => {
     if (choice === 4) {
       setMessages([messages[0]]);
-      saveToLocalStorage([]);
+      saveHistory([]);
       setShowOptions(false);
     } else if (choice === 5) {
       if (!apiKeys.gemini) {
@@ -309,7 +396,7 @@ const Index = () => {
             { type: "answer", content: JSON.stringify(review, null, 2) }
           ];
           setMessages(updatedMessages);
-          saveToLocalStorage(updatedMessages.slice(1));
+          saveHistory(updatedMessages.slice(1));
         }
       } catch (error) {
         console.error("Architect review error:", error);
@@ -349,6 +436,109 @@ const Index = () => {
     }
   };
 
+  const handleRevisionRequest = async (improvements: string[]) => {
+    setIsProcessing(true);
+    setShowOptions(false);
+    
+    try {
+      // Get the original query and last solution
+      const originalQuery = messages.find(m => m.type === 'user')?.content || '';
+      const lastSolution = messages.find(m => m.type === 'answer' && !m.content.includes('"criticalIssues"'))?.content || '';
+      const improvementsList = improvements.join('\n');
+      
+      // Create a new message that includes the improvements and context
+      const revisionMessage = `
+Original Query: ${originalQuery}
+
+Previous Solution:
+${lastSolution}
+
+Requested Improvements:
+${improvementsList}
+
+Please provide a complete revised solution addressing all the improvements listed above. 
+Ensure the solution is clear, complete, and addresses each improvement point.`;
+
+      // Add revision request to messages
+      const revisionRequestMessage: Message = {
+        type: "system",
+        content: "🔄 Sending revision request..."
+      };
+      setMessages(prev => [...prev, revisionRequestMessage]);
+
+      // Send the revision request
+      const response = await callDeepSeek(revisionMessage, apiKeys.deepseek, messages);
+
+      if (response.status === 'complete') {
+        const updatedMessages: Message[] = [
+          ...messages.filter(m => m.content !== "🔄 Sending revision request..."),
+          { type: "system", content: "📝 Revision Attempt #" + revisionCount },
+          { type: "reasoning", content: response.reasoning },
+          { type: "answer", content: response.content }
+        ];
+
+        setMessages(updatedMessages);
+        saveHistory(updatedMessages);
+        setRevisionCount(prev => prev + 1);
+
+        // Show success toast
+        toast({
+          title: "Revision Complete",
+          description: "The solution has been revised based on the improvements.",
+        });
+      } else if (response.status === 'timeout') {
+        toast({
+          title: "Revision Timeout",
+          description: "The revision request timed out. Would you like to try again or escalate to architect review?",
+          action: (
+            <ToastAction altText="Escalate" onClick={() => handleArchitectEscalation(revisionMessage)}>
+              Escalate to Architect
+            </ToastAction>
+          ),
+          duration: 10000
+        });
+      }
+    } catch (error) {
+      console.error("Revision request failed:", error);
+      const currentQuery = messages.find(m => m.type === 'user')?.content || '';
+      toast({
+        title: "Error",
+        description: "Failed to process revision request. Please try again or escalate to architect review.",
+        variant: "destructive",
+        action: (
+          <ToastAction altText="Escalate" onClick={() => handleArchitectEscalation(currentQuery)}>
+            Escalate to Architect
+          </ToastAction>
+        )
+      });
+    } finally {
+      setIsProcessing(false);
+      setShowOptions(true);
+    }
+  };
+
+  // Update the message rendering to include revision handling
+  const renderMessage = (message: Message, index: number) => {
+    if (message.type === "answer" && message.content.includes('"criticalIssues"')) {
+      try {
+        const review = JSON.parse(message.content) as ArchitectReviewType;
+        return (
+          <ArchitectReview
+            key={index}
+            review={review}
+            onRevisionRequest={() => handleRevisionRequest(review.improvements)}
+            isProcessing={isProcessing}
+            revisionNumber={revisionCount}
+          />
+        );
+      } catch (error) {
+        console.error("Failed to parse review:", error);
+        return <ChatMessage key={index} type={message.type} content={message.content} />;
+      }
+    }
+    return <ChatMessage key={index} type={message.type} content={message.content} />;
+  };
+
   if (!apiKeys.deepseek) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
@@ -384,13 +574,7 @@ const Index = () => {
       </div>
 
       <div className="flex-1 overflow-auto space-y-4 mb-4">
-        {messages.map((message, index) => (
-          message.type === "answer" && message.content.includes('"criticalIssues"') ? (
-            <ArchitectReview key={index} review={JSON.parse(message.content)} />
-          ) : (
-            <ChatMessage key={index} type={message.type} content={message.content} />
-          )
-        ))}
+        {messages.map((message, index) => renderMessage(message, index))}
         {isProcessing && (
           <div className="flex items-center justify-center p-4">
             <Loader2 className="h-6 w-6 animate-spin text-primary" />
