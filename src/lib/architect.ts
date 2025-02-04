@@ -1,11 +1,12 @@
 import { Message } from "./api";
+import { processMessageContext, formatMessagesForArchitect } from "./messageContext";
 
 export interface ArchitectReview {
   criticalIssues: string[];
   potentialProblems: string[];
   improvements: string[];
   verdict: "APPROVED" | "NEEDS_REVISION";
-  solution?: string; // Added for when architect provides a solution
+  solution?: string;
 }
 
 const validateCode = (content: string): { issues: string[], problems: string[] } => {
@@ -129,38 +130,128 @@ const validateReviewFormat = (review: any, codeContent: string): ArchitectReview
   }
 };
 
+// Rename to avoid conflict with imported function
+const validateArchitectMessageChain = (messages: Message[], allowPartial: boolean = true): boolean => {
+  if (!Array.isArray(messages)) {
+    console.warn('Invalid message chain format');
+    return false;
+  }
+
+  if (messages.length === 0) {
+    console.warn('Empty message chain');
+    return allowPartial;
+  }
+
+  const userMessages = messages.filter(m => m.type === 'user');
+  if (userMessages.length === 0) {
+    console.warn('No user messages found in chain');
+    return allowPartial;
+  }
+
+  const validMessages = messages.filter(m => 
+    m && typeof m === 'object' && 
+    'type' in m && 
+    'content' in m && 
+    typeof m.content === 'string'
+  );
+
+  if (validMessages.length !== messages.length) {
+    console.warn('Some messages in chain are invalid');
+    return allowPartial;
+  }
+
+  return true;
+};
+
 export const callArchitectLLM = async (
   messages: Message[],
   apiKey: string,
   mode: 'review' | 'solve' = 'review'
 ): Promise<ArchitectReview | null> => {
   try {
-    // Extract the original question from user messages
-    const originalQuestion = messages.find(m => m.type === 'user')?.content || '';
-    
-    // Format messages for better context
-    const formattedMessages = messages.map(m => {
-      let prefix = '';
-      switch (m.type) {
-        case 'user': prefix = '👤 User:'; break;
-        case 'answer': prefix = '🤖 Assistant:'; break;
-        case 'reasoning': prefix = '💭 Reasoning:'; break;
-        default: prefix = m.type.toUpperCase() + ':';
-      }
-      return `${prefix} ${m.content.trim()}`;
-    }).join('\n\n');
+    // Validate message chain with relaxed validation for partial responses
+    if (!validateArchitectMessageChain(messages, true)) {
+      const lastUserMessage = messages.find(m => m.type === 'user')?.content;
+      const partialContent = messages
+        .filter(m => m.type === 'answer' || m.type === 'reasoning')
+        .map(m => m.content)
+        .join('\n');
 
-    // Extract code content for validation
-    const codeContent = messages
-      .filter(m => m.type === 'answer')
-      .map(m => m.content)
-      .join('\n');
+      if (lastUserMessage || partialContent) {
+        return {
+          criticalIssues: ["Incomplete message chain"],
+          potentialProblems: ["Some context may be missing"],
+          improvements: ["Will attempt to work with available content"],
+          verdict: "NEEDS_REVISION",
+          solution: partialContent || lastUserMessage
+        };
+      }
+
+      return {
+        criticalIssues: ["Invalid or corrupted message chain"],
+        potentialProblems: ["Message history may be incomplete"],
+        improvements: ["Please try your question again"],
+        verdict: "NEEDS_REVISION"
+      };
+    }
+
+    // Process message context with improved handling
+    const context = processMessageContext(messages);
+    
+    // More lenient validation for questions
+    const question = context.lastUserMessage?.content || context.originalQuestion;
+    if (!question) {
+      console.error('No question found in context:', context.debug);
+      return {
+        criticalIssues: ["No clear question found"],
+        potentialProblems: ["Previous context may be available"],
+        improvements: ["Please provide your question"],
+        verdict: "NEEDS_REVISION",
+        solution: context.relevantHistory
+          .filter(m => m.type === 'answer')
+          .map(m => m.content)
+          .join('\n')
+      };
+    }
+
+    // Format messages with improved context
+    const formattedContext = formatMessagesForArchitect(context);
+
+    // Enhanced solve prompt with better partial response handling
+    const solvePrompt = `You are an EXPERT PROBLEM SOLVER. Your task is to solve this specific question:
+
+${formattedContext}
+
+SOLUTION REQUIREMENTS:
+1. You MUST provide a solution to the question above
+2. If the question or context is incomplete, work with what's available
+3. Show your work and reasoning where possible
+4. If providing code:
+   - Include necessary dependencies
+   - Add error handling if possible
+   - Make the code as complete as possible given the context
+5. If you can't provide a complete solution, provide the best partial solution possible
+
+YOUR RESPONSE MUST BE A VALID JSON OBJECT with these exact fields:
+{
+  "criticalIssues": [],
+  "potentialProblems": [],
+  "improvements": [],
+  "verdict": "APPROVED",
+  "solution": "YOUR SOLUTION HERE"
+}
+
+IMPORTANT RULES:
+1. Always provide a solution, even if partial
+2. If the context is incomplete, work with what you have
+3. Do not use markdown formatting in the solution
+4. If clarification is needed, include it in criticalIssues but still attempt a solution
+5. Mark partial or incomplete solutions in potentialProblems`;
 
     // Different prompts based on mode
-    const reviewPrompt = `You are a CRITICAL CODE REVIEWER analyzing a conversation and solution. Your task:
+    const reviewPrompt = `You are a CRITICAL CODE REVIEWER analyzing this conversation:
 
-CONTEXT:
-${formattedMessages}
+${formattedContext}
 
 REVIEW INSTRUCTIONS:
 1. Analyze the conversation flow, solution quality, and technical accuracy
@@ -168,22 +259,6 @@ REVIEW INSTRUCTIONS:
 3. Check for missing dependencies, error handling, and best practices
 4. Suggest specific improvements with examples
 5. If there are no critical issues, explain why the solution is good`;
-
-    const solvePrompt = `You are an EXPERT PROBLEM SOLVER tasked with solving this problem from scratch:
-
-ORIGINAL QUESTION:
-${originalQuestion}
-
-PREVIOUS ATTEMPT CONTEXT:
-${formattedMessages}
-
-SOLUTION INSTRUCTIONS:
-1. Solve the original question completely and accurately
-2. Show all your work and calculations
-3. Provide clear explanations for each step
-4. Include any necessary formulas, code, or mathematical explanations
-5. Double-check your calculations and logic
-6. If it's a coding problem, include complete working code with all necessary dependencies`;
 
     const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent", {
       method: "POST",
@@ -246,13 +321,75 @@ The verdict should be "NEEDS_REVISION" if ANY critical issues exist.`
     try {
       const cleanedText = cleanJsonResponse(reviewText);
       const parsedReview = JSON.parse(cleanedText);
+      
+      // Additional validation for solve mode with partial response handling
+      if (mode === 'solve') {
+        if (!parsedReview.solution) {
+          // Try to extract any partial solution from the context
+          const partialSolution = context.relevantHistory
+            .filter(m => m.type === 'answer')
+            .map(m => m.content)
+            .join('\n');
+
+          parsedReview.solution = partialSolution || "Partial solution not available";
+          parsedReview.potentialProblems = [
+            ...(parsedReview.potentialProblems || []),
+            "Solution may be incomplete"
+          ];
+        }
+
+        if (parsedReview.solution.includes("no question provided")) {
+          console.error('Architect failed to process question:', {
+            originalQuestion: context.originalQuestion,
+            lastUserMessage: context.lastUserMessage?.content,
+            debug: context.debug
+          });
+          
+          return {
+            criticalIssues: [
+              "Failed to process the question properly",
+              `Question was: ${question}`
+            ],
+            potentialProblems: ["Architect may need more context"],
+            improvements: ["Please try rephrasing your question"],
+            verdict: "NEEDS_REVISION",
+            solution: parsedReview.solution
+          };
+        }
+      }
+      
+      // Extract code content for validation
+      const codeContent = messages
+        .filter(m => m.type === 'answer')
+        .map(m => m.content)
+        .join('\n');
+      
       return validateReviewFormat(parsedReview, codeContent);
     } catch (parseError) {
-      console.error('Failed to parse review:', parseError);
-      return validateReviewFormat(null, codeContent);
+      console.error('Failed to parse architect response:', parseError);
+      
+      // Try to salvage any partial content
+      const partialContent = context.relevantHistory
+        .filter(m => m.type === 'answer')
+        .map(m => m.content)
+        .join('\n');
+
+      return {
+        criticalIssues: ["Failed to parse architect response", parseError.message],
+        potentialProblems: ["Response format may be invalid"],
+        improvements: ["Please try the request again"],
+        verdict: "NEEDS_REVISION",
+        solution: partialContent || null
+      };
     }
   } catch (error) {
     console.error("Error calling Architect LLM:", error);
-    return validateReviewFormat(null, '');
+    return {
+      criticalIssues: ["Error calling architect service", error.message],
+      potentialProblems: ["Service may be temporarily unavailable"],
+      improvements: ["Please try again later"],
+      verdict: "NEEDS_REVISION",
+      solution: null
+    };
   }
 };

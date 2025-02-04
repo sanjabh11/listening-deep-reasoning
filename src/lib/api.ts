@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { shouldEscalateToArchitect, getRetryDelay, sleep } from './escalation';
+import { processMessageContext } from './messageContext';
 
 const API_KEY_REGEX = /^[A-Za-z0-9_-]{10,}$/;
 
@@ -29,6 +31,18 @@ export type MessageType = "user" | "reasoning" | "answer" | "system";
 export interface Message {
   type: MessageType;
   content: string;
+}
+
+export interface MessageContext {
+  originalQuestion: string;
+  relevantHistory: Message[];
+  hasFailedAttempts: boolean;
+  lastUserMessage: Message | null;
+  debug?: {
+    messageCount: number;
+    userMessageCount: number;
+    processedAt: string;
+  };
 }
 
 const STORAGE_KEY = "chat_history";
@@ -187,158 +201,274 @@ const cleanJsonString = (str: string): string => {
   return str;
 };
 
+// Add new interfaces for partial responses
+interface PartialResponse {
+  content: string;
+  timestamp: number;
+  isComplete: boolean;
+}
+
+// Update timeout configurations
+const API_TIMEOUTS = {
+  INITIAL_RESPONSE: 180000,    // 3 minutes
+  RETRY_DELAY: 10000,         // 10 seconds
+  MAX_RETRIES: 3,
+  MAX_TOTAL_TIME: 300000      // 5 minutes
+};
+
+// Add partial response handling
+let currentPartialResponse: PartialResponse | null = null;
+
+const handleStreamResponse = async (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onUpdate: (content: string) => void
+): Promise<string> => {
+  const decoder = new TextDecoder();
+  let fullContent = '';
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // Decode the chunk and add to buffer
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete lines from buffer
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        // Skip keep-alive messages
+        if (line.trim() === ': keep-alive') continue;
+
+        // Process data lines
+        if (line.startsWith('data: ')) {
+          const jsonStr = line.slice(6);
+          if (jsonStr === '[DONE]') continue;
+
+          try {
+            const data = JSON.parse(jsonStr);
+            const content = data.choices?.[0]?.message?.content;
+            if (content) {
+              fullContent += content;
+              onUpdate(fullContent);
+            }
+          } catch (error) {
+            console.warn('Error parsing stream data:', error);
+          }
+        }
+      }
+    }
+
+    // Process any remaining content in buffer
+    if (buffer.trim() && !buffer.includes(': keep-alive')) {
+      try {
+        const data = JSON.parse(buffer);
+        const content = data.choices?.[0]?.message?.content;
+        if (content) {
+          fullContent += content;
+          onUpdate(fullContent);
+        }
+      } catch (error) {
+        console.warn('Error parsing final buffer:', error);
+      }
+    }
+  } catch (error) {
+    console.error('Error processing stream:', error);
+    throw error;
+  }
+
+  return fullContent;
+};
+
 export const callDeepSeek = async (
   message: string,
   apiKey: string,
-  context: Message[] = [],
-  onThoughtUpdate?: (thought: any) => void,
-  retryCount: number = 0
+  previousMessages: Message[] = [],
+  onThoughtUpdate?: (thought: any) => void
 ): Promise<ApiResponse> => {
-  try {
-    const validatedKey = validateApiKey(apiKey);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes timeout
+  let retryCount = 0;
+  let lastError: Error | null = null;
 
-    // First attempt to get thought process
+  const updateThought = (content: string) => {
+    const thought = {
+      type: 'thinking',
+      content,
+      timestamp: Date.now()
+    };
+    onThoughtUpdate?.(thought);
+    // Also add to previous messages to maintain context
+    previousMessages.push({
+      type: 'system',
+      content: content
+    });
+  };
+
+  while (retryCount <= API_TIMEOUTS.MAX_RETRIES) {
     try {
+      // Create context with ALL messages including system messages
+      const context = processMessageContext([
+        ...previousMessages,
+        { type: 'user', content: message }
+      ]);
+      
+      // Enhanced debug logging
+      console.debug('API Context:', {
+        totalMessages: previousMessages.length,
+        messageTypes: previousMessages.map(m => m.type),
+        originalQuestion: context.originalQuestion,
+        hasFailedAttempts: context.hasFailedAttempts,
+        lastUserMessage: context.lastUserMessage?.content,
+        fullContext: context
+      });
+
+      updateThought("Analyzing your question...");
+      
       const thoughtResponse = await fetch(API_URL, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${validatedKey}`,
-          'Accept': 'application/json'
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
         },
-        signal: controller.signal,
         body: JSON.stringify({
           model: "deepseek-chat",
           messages: [
-            { 
-              role: "system", 
-              content: "You are in THINKING mode. Break down the problem step by step. Return your response in this exact JSON format without any markdown:\n{\"type\": \"thinking\", \"content\": \"your detailed thought process here\"}"
+            {
+              role: "system",
+              content: `You are in THINKING mode. Analyze the conversation and determine if architect assistance is needed.
+                       The complete conversation history is provided below.
+                       Format your response with these sections:
+                       1. Original Question: [Extract and state the original question]
+                       2. Current Status: [Describe where we are in solving it]
+                       3. Issues Found: [List any problems or challenges]
+                       4. Architect Needed?: [Yes/No and why]`
             },
-            ...context.map(msg => ({
-              role: msg.type === 'user' ? 'user' : 'assistant',
-              content: msg.content
-            })),
-            { role: "user", content: message }
+            {
+              role: "user",
+              content: formatMessagesForArchitect(context)
+            }
           ],
           temperature: 0.7,
-          max_tokens: 2000
+          max_tokens: 2000,
+          stream: false
         })
       });
 
       if (!thoughtResponse.ok) {
-        throw new Error(`API error: ${thoughtResponse.status}`);
+        throw new Error(`API Error: ${thoughtResponse.status} ${thoughtResponse.statusText}`);
       }
 
       const thoughtData = await thoughtResponse.json();
-      const thoughts: ThoughtProcess[] = [];
+      const thoughtContent = thoughtData?.choices?.[0]?.message?.content;
       
-      if (thoughtData?.choices?.[0]?.message?.content) {
-        const cleanedJson = cleanJsonString(thoughtData.choices[0].message.content);
-        const thoughtContent = JSON.parse(cleanedJson);
-        const thought: ThoughtProcess = {
-          type: thoughtContent.type || 'thinking',
-          content: thoughtContent.content || thoughtContent.toString(),
-          timestamp: Date.now()
-        };
-        thoughts.push(thought);
-        onThoughtUpdate?.(thought);
+      if (thoughtContent) {
+        updateThought(thoughtContent);
+        // Add thought to context
+        previousMessages.push({
+          type: 'reasoning',
+          content: thoughtContent
+        });
       }
 
-      // Get solution with chunked streaming
+      // Update context with new messages
+      const updatedContext = processMessageContext([
+        ...previousMessages,
+        { type: 'user', content: message }
+      ]);
+
+      updateThought("Generating solution...");
+      
       const solutionResponse = await fetch(API_URL, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${validatedKey}`,
-          'Accept': 'application/json'
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
         },
-        signal: controller.signal,
         body: JSON.stringify({
           model: "deepseek-chat",
           messages: [
-            { 
-              role: "system", 
-              content: "You are in SOLUTION mode. Provide a clear, direct answer to the problem."
+            {
+              role: "system",
+              content: `You are in SOLUTION mode. Review the complete conversation history below.
+                       If you cannot solve the problem, explicitly state why and recommend architect escalation.
+                       Format your response clearly with:
+                       1. Understanding: [Show you understand the question]
+                       2. Approach: [Explain your solution approach]
+                       3. Solution: [Provide the solution or explain why escalation is needed]`
             },
-            ...context.map(msg => ({
-              role: msg.type === 'user' ? 'user' : 'assistant',
-              content: msg.content
-            })),
-            { role: "user", content: message }
+            {
+              role: "user",
+              content: formatMessagesForArchitect(updatedContext)
+            }
           ],
           temperature: 0.7,
-          max_tokens: 4000
+          max_tokens: 4000,
+          stream: false
         })
       });
 
-      clearTimeout(timeoutId);
-
       if (!solutionResponse.ok) {
-        throw new Error(`API error: ${solutionResponse.status}`);
+        throw new Error(`API Error: ${solutionResponse.status} ${solutionResponse.statusText}`);
       }
 
       const solutionData = await solutionResponse.json();
-      
-      if (!solutionData?.choices?.[0]?.message?.content) {
+      const solutionContent = solutionData?.choices?.[0]?.message?.content;
+
+      if (!solutionContent) {
         throw new Error('Empty response from API');
       }
 
+      // Add solution to context
+      previousMessages.push({
+        type: 'answer',
+        content: solutionContent
+      });
+
       return {
-        content: solutionData.choices[0].message.content,
-        reasoning: "Analysis complete",
-        thoughtProcess: thoughts,
-        status: 'complete'
+        status: 'complete',
+        content: solutionContent,
+        reasoning: thoughtContent || 'Analysis complete',
+        thoughtProcess: [{
+          type: 'thinking',
+          content: thoughtContent || 'Processing complete',
+          timestamp: Date.now()
+        }]
       };
 
-    } catch (innerError) {
-      // Check if we should retry or escalate
-      const { shouldEscalate, reason } = checkForAutoEscalation(innerError, retryCount);
+    } catch (error) {
+      console.error(`API attempt ${retryCount + 1} failed:`, error);
+      lastError = error;
+      retryCount++;
       
-      if (shouldEscalate) {
-        return {
-          content: "I encountered difficulties processing your request.",
-          reasoning: reason,
-          thoughtProcess: [],
-          status: 'error',
-          shouldEscalateToArchitect: true,
-          escalationReason: reason
-        };
-      }
+      if (retryCount <= API_TIMEOUTS.MAX_RETRIES) {
+        const retryMessage = `Retrying... Attempt ${retryCount + 1}/${API_TIMEOUTS.MAX_RETRIES}`;
+        updateThought(retryMessage);
+        await sleep(getRetryDelay(retryCount));
+      } else {
+        // On final retry, check for escalation
+        const escalationCheck = shouldEscalateToArchitect(
+          message,
+          error.message,
+          retryCount,
+          previousMessages
+        );
 
-      // If not escalating, retry after delay
-      if (retryCount < MAX_RETRIES) {
-        await delay(RETRY_DELAY);
-        return callDeepSeek(message, apiKey, context, onThoughtUpdate, retryCount + 1);
+        if (escalationCheck.shouldEscalate) {
+          return {
+            status: 'complete',
+            shouldEscalateToArchitect: true,
+            escalationReason: escalationCheck.reason,
+            content: '',
+            reasoning: `Escalating to architect: ${escalationCheck.reason}`
+          };
+        }
       }
     }
-
-    throw new Error('Failed to process request');
-
-  } catch (error) {
-    console.error('DeepSeek API Error:', error);
-
-    const { shouldEscalate, reason } = checkForAutoEscalation(error, retryCount);
-
-    if (shouldEscalate) {
-      return {
-        content: "The AI service encountered difficulties.",
-        reasoning: reason,
-        thoughtProcess: [],
-        status: 'error',
-        shouldEscalateToArchitect: true,
-        escalationReason: reason
-      };
-    }
-
-    return {
-      content: "The AI service encountered an error. Please try again in a moment.",
-      reasoning: error.message || "Unknown error",
-      thoughtProcess: [],
-      status: 'error'
-    };
   }
+
+  throw lastError || new Error('Unknown error in API call');
 };
 
 // Add history storage functions
@@ -367,3 +497,42 @@ export const loadHistory = (): Message[] => {
   }
   return [];
 };
+
+function formatMessagesForArchitect(context: MessageContext): string {
+  const sections = [
+    '=== ORIGINAL QUESTION ===',
+    context.originalQuestion || 'No original question found',
+    '',
+    '=== CURRENT QUESTION ===',
+    context.lastUserMessage?.content || context.originalQuestion || 'No question found',
+    '',
+    '=== COMPLETE CONVERSATION HISTORY ===',
+    ...context.relevantHistory.map(m => {
+      let prefix;
+      switch (m.type) {
+        case 'user':
+          prefix = '👤 User Question:';
+          break;
+        case 'answer':
+          prefix = '🤖 Assistant Answer:';
+          break;
+        case 'reasoning':
+          prefix = '💭 Assistant Reasoning:';
+          break;
+        case 'system':
+          prefix = '⚙️ System:';
+          break;
+        default:
+          prefix = (m.type as string).toUpperCase() + ':';
+      }
+      return `${prefix}\n${m.content.trim()}`;
+    }),
+    '',
+    '=== CONVERSATION METADATA ===',
+    `Total Messages: ${context.debug?.messageCount || 0}`,
+    `User Messages: ${context.debug?.userMessageCount || 0}`,
+    `Last Update: ${context.debug?.processedAt || 'unknown'}`
+  ];
+
+  return sections.join('\n\n');
+}
